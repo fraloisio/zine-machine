@@ -46,18 +46,28 @@ const COLORS = {
 };
 
 const PALETTE = [
-  { id: "strip3", type: "strip", size: 3 },
-  { id: "strip4", type: "strip", size: 4 },
-  { id: "strip5", type: "strip", size: 5 },
-  { id: "strip6", type: "strip", size: 6 },
-  { id: "strip7", type: "strip", size: 7 },
-  { id: "strip8", type: "strip", size: 8 },
-  { id: "slot3",  type: "slottedStrip", size: 3 },
-  { id: "slot4",  type: "slottedStrip", size: 4 },
-  { id: "slot5",  type: "slottedStrip", size: 5 },
-  { id: "slot6",  type: "slottedStrip", size: 6 },
-  { id: "slot7",  type: "slottedStrip", size: 7 },
-  { id: "slot8",  type: "slottedStrip", size: 8 },
+  { id: "strip2",  type: "strip", size: 2 },
+  { id: "strip3",  type: "strip", size: 3 },
+  { id: "strip4",  type: "strip", size: 4 },
+  { id: "strip5",  type: "strip", size: 5 },
+  { id: "strip6",  type: "strip", size: 6 },
+  { id: "strip7",  type: "strip", size: 7 },
+  { id: "strip8",  type: "strip", size: 8 },
+  { id: "strip9",  type: "strip", size: 9 },
+  { id: "strip10", type: "strip", size: 10 },
+  { id: "strip11", type: "strip", size: 11 },
+  { id: "strip12", type: "strip", size: 12 },
+  { id: "slot2",   type: "slottedStrip", size: 2 },
+  { id: "slot3",   type: "slottedStrip", size: 3 },
+  { id: "slot4",   type: "slottedStrip", size: 4 },
+  { id: "slot5",   type: "slottedStrip", size: 5 },
+  { id: "slot6",   type: "slottedStrip", size: 6 },
+  { id: "slot7",   type: "slottedStrip", size: 7 },
+  { id: "slot8",   type: "slottedStrip", size: 8 },
+  { id: "slot9",   type: "slottedStrip", size: 9 },
+  { id: "slot10",  type: "slottedStrip", size: 10 },
+  { id: "slot11",  type: "slottedStrip", size: 11 },
+  { id: "slot12",  type: "slottedStrip", size: 12 },
   { id: "triangle", type: "triangle" },
   { id: "square",   type: "square" },
   { id: "pentagon", type: "pentagon" },
@@ -155,6 +165,32 @@ function partLabel(p) {
   if (p.type === "slottedStrip") return `Slot ${p.size}`;
   if (p.type === "motor") return "Motor";
   return p.type[0].toUpperCase() + p.type.slice(1);
+}
+
+function getPivotHoleOptions(part) {
+  if (part.type !== "strip" && part.type !== "slottedStrip") return [];
+  const n = part.size;
+  return [...new Set([0, Math.floor((n - 1) / 2), n - 1])];
+}
+
+function roundedPolygonPath(verts, r) {
+  const n = verts.length;
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    const prev = verts[(i - 1 + n) % n];
+    const curr = verts[i];
+    const next = verts[(i + 1) % n];
+    const d1x = curr.x - prev.x, d1y = curr.y - prev.y;
+    const d2x = next.x - curr.x, d2y = next.y - curr.y;
+    const l1 = Math.hypot(d1x, d1y), l2 = Math.hypot(d2x, d2y);
+    const cr = Math.min(r, l1 / 2, l2 / 2);
+    const p1x = curr.x - (d1x / l1) * cr, p1y = curr.y - (d1y / l1) * cr;
+    const p2x = curr.x + (d2x / l2) * cr, p2y = curr.y + (d2y / l2) * cr;
+    if (i === 0) d += `M ${p1x} ${p1y}`;
+    else d += ` L ${p1x} ${p1y}`;
+    d += ` Q ${curr.x} ${curr.y} ${p2x} ${p2y}`;
+  }
+  return d + ' Z';
 }
 
 // ---------- Reducer ----------
@@ -268,6 +304,41 @@ function reducer(state, action) {
     }
     case "CLEAR":
       return { ...state, ...snap(state), parts: [], joints: [], selectedId: null };
+    case "BRING_FORWARD": {
+      return {
+        ...state,
+        ...snap(state),
+        parts: state.parts.map(p => p.id === action.id ? { ...p, zIndex: (p.zIndex ?? 0) + 1 } : p),
+      };
+    }
+    case "SEND_BACKWARD": {
+      return {
+        ...state,
+        ...snap(state),
+        parts: state.parts.map(p => p.id === action.id ? { ...p, zIndex: Math.max(0, (p.zIndex ?? 0) - 1) } : p),
+      };
+    }
+    case "CONVERT_JOINT": {
+      return {
+        ...state,
+        ...snap(state),
+        joints: state.joints.map(j => j.id === action.id ? { ...j, kind: action.kind } : j),
+      };
+    }
+    case "MOVE_JOINT_LIVE": {
+      return {
+        ...state,
+        joints: state.joints.map(j => j.id === action.id ? { ...j, x: action.x, y: action.y } : j),
+      };
+    }
+    case "COMMIT_JOINT_MOVE": {
+      return {
+        ...state,
+        joints: state.joints.map(j => j.id === action.id
+          ? { ...j, x: action.x, y: action.y, partIds: action.partIds }
+          : j),
+      };
+    }
     default:
       return state;
   }
@@ -332,16 +403,10 @@ function SlottedStripShape({ part, ghost = false }) {
 function PolyShape({ part, ghost = false }) {
   const holes = getLocalHoles(part);
   const vertices = getLocalVertices(part);
-  const pts = vertices.map(h => `${h.x * GRID},${h.y * GRID}`).join(" ");
+  const d = roundedPolygonPath(vertices.map(v => ({ x: v.x * GRID, y: v.y * GRID })), 8);
   return (
     <g opacity={ghost ? 0.45 : 1}>
-      <polygon
-        points={pts}
-        fill={COLORS.part}
-        stroke={COLORS.partEdge}
-        strokeWidth="1.4"
-        strokeLinejoin="round"
-      />
+      <path d={d} fill={COLORS.part} stroke={COLORS.partEdge} strokeWidth="1.4" />
       {holes.map((h, i) => (
         <circle key={i} cx={h.x * GRID} cy={h.y * GRID} r={HOLE_R_PART} fill={COLORS.partHole} />
       ))}
@@ -845,6 +910,9 @@ export default function ZineMachine() {
   const [ctxMenu, setCtxMenu] = useState(null);   // { x, y, part } client coords
   const [jointSnap, setJointSnap] = useState(null); // {x, y} nearest part hole when joint tool active
   const [selectedJointId, setSelectedJointId] = useState(null);
+  const [jointCtxMenu, setJointCtxMenu] = useState(null);
+  const [jointDrag, setJointDrag] = useState(null);
+  const [hoverPivotHole, setHoverPivotHole] = useState(null);
 
   // Simulation state
   const [simParts, setSimParts] = useState(null);
@@ -967,6 +1035,30 @@ export default function ZineMachine() {
       setJointSnap(null);
     }
 
+    // Pivot hole hover tracking for selected strip
+    const selPart = st.parts.find(p => p.id === st.selectedId);
+    if (selPart && st.tool === "select" && (selPart.type === "strip" || selPart.type === "slottedStrip")) {
+      const opts = getPivotHoleOptions(selPart);
+      let nearestPivot = null, bestPivotDist = 0.8;
+      for (const hIdx of opts) {
+        const wh = worldHoles(selPart)[hIdx];
+        if (wh) {
+          const d = Math.hypot(g.x - wh.x, g.y - wh.y);
+          if (d < bestPivotDist) { bestPivotDist = d; nearestPivot = hIdx; }
+        }
+      }
+      setHoverPivotHole(nearestPivot !== null ? { partId: selPart.id, holeIdx: nearestPivot } : null);
+    } else {
+      setHoverPivotHole(null);
+    }
+
+    // Joint drag
+    if (jointDrag) {
+      const newPos = jointSnap ?? snapToBoard(g.x, g.y);
+      dispatch({ type: "MOVE_JOINT_LIVE", id: jointDrag.id, x: newPos.x, y: newPos.y });
+      return;
+    }
+
     if (!drag) return;
 
     if (drag.kind === "move") {
@@ -1019,7 +1111,29 @@ export default function ZineMachine() {
     }
   };
 
-  const handleSvgUp = () => { setDrag(null); setSnapHint(null); };
+  const handleSvgUp = (e) => {
+    if (jointDrag) {
+      const g = e ? pointerToGrid(e) : null;
+      const pos = jointSnap ?? (g ? snapToBoard(g.x, g.y) : { x: jointDrag.origX, y: jointDrag.origY });
+      const partsHere = st.parts.filter(p => {
+        if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.6)) return true;
+        if (p.type === "slottedStrip") {
+          const θr = p.rotation * Math.PI / 180;
+          const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
+          const relX = pos.x - p.x, relY = pos.y - p.y;
+          const along = relX * cosθ + relY * sinθ;
+          const perp = Math.abs(-relX * sinθ + relY * cosθ);
+          if (along >= 0.4 && along <= p.size - 1.4 && perp < 0.6) return true;
+        }
+        return false;
+      });
+      dispatch({ type: "COMMIT_JOINT_MOVE", id: jointDrag.id, x: pos.x, y: pos.y, partIds: partsHere.map(p => p.id) });
+      setJointDrag(null);
+      return;
+    }
+    setDrag(null);
+    setSnapHint(null);
+  };
 
   // ---- Click on board (place new part if palette active) ----
   const handleSvgDown = (e) => {
@@ -1052,12 +1166,37 @@ export default function ZineMachine() {
         return false;
       });
       if (st.tool !== "ground" && partsHere.length === 0) return;
+      // Snap to exact hole center of first connected part
+      let snappedPos = { ...pos };
+      for (const p of partsHere) {
+        for (const wh of worldHoles(p)) {
+          if (Math.hypot(wh.x - pos.x, wh.y - pos.y) < 0.7) { snappedPos = wh; break; }
+        }
+        break;
+      }
       dispatch({
         type: "ADD_JOINT",
-        joint: { kind: st.tool, x: pos.x, y: pos.y, partIds: partsHere.map(p => p.id) },
+        joint: { kind: st.tool, x: snappedPos.x, y: snappedPos.y, partIds: partsHere.map(p => p.id) },
       });
       return;
     }
+    // Pivot hole selection for selected strip (select tool only)
+    if (st.tool === "select" && st.selectedId) {
+      const selPart2 = st.parts.find(p => p.id === st.selectedId);
+      if (selPart2 && (selPart2.type === "strip" || selPart2.type === "slottedStrip")) {
+        const g3 = pointerToGrid(e);
+        if (g3) {
+          for (const hIdx of getPivotHoleOptions(selPart2)) {
+            const wh = worldHoles(selPart2)[hIdx];
+            if (wh && Math.hypot(g3.x - wh.x, g3.y - wh.y) < 0.7) {
+              dispatch({ type: "UPDATE_PART", id: selPart2.id, updates: { pivotHoleIdx: hIdx } });
+              return;
+            }
+          }
+        }
+      }
+    }
+
     // Click on empty board deselects
     if (e.target === svgRef.current || e.target.dataset?.bg === "1") {
       dispatch({ type: "SELECT", id: null });
@@ -1093,18 +1232,17 @@ export default function ZineMachine() {
     dispatch({ type: "SELECT", id: part.id });
     dispatch({ type: "SNAPSHOT" });
 
-    // Use the first joint on this part as the rotation pivot
-    const joint = st.joints.find(j => j.partIds.includes(part.id));
+    const pivotIdx = part.pivotHoleIdx ?? 0;
+    const localHoles = getLocalHoles(part);
+    const wh = worldHoles(part);
     let pivot = null;
-    if (joint) {
-      const localHoles = getLocalHoles(part);
-      const wh = worldHoles(part);
-      const holeIdx = wh.findIndex(h =>
-        Math.abs(Math.round(h.x) - joint.x) < 0.01 &&
-        Math.abs(Math.round(h.y) - joint.y) < 0.01
-      );
-      if (holeIdx >= 0) {
-        pivot = { x: joint.x, y: joint.y, localHole: localHoles[holeIdx] };
+    if (localHoles[pivotIdx] && wh[pivotIdx]) {
+      pivot = { x: wh[pivotIdx].x, y: wh[pivotIdx].y, localHole: localHoles[pivotIdx] };
+    } else {
+      const joint = st.joints.find(j => j.partIds.includes(part.id));
+      if (joint) {
+        const holeIdx = wh.findIndex(h => Math.hypot(h.x - joint.x, h.y - joint.y) < 0.5);
+        if (holeIdx >= 0) pivot = { x: wh[holeIdx].x, y: wh[holeIdx].y, localHole: localHoles[holeIdx] };
       }
     }
 
@@ -1112,7 +1250,7 @@ export default function ZineMachine() {
   };
 
 
-  const handleJointClick = (e, joint) => {
+  const handleJointDown = (e, joint) => {
     if (st.mode !== "build") return;
     e.stopPropagation();
     if (st.tool === "delete") {
@@ -1123,6 +1261,8 @@ export default function ZineMachine() {
     if (st.tool === "select") {
       dispatch({ type: "SELECT", id: null });
       setSelectedJointId(joint.id);
+      dispatch({ type: "SNAPSHOT" });
+      setJointDrag({ id: joint.id, origX: joint.x, origY: joint.y });
     }
   };
 
@@ -1178,6 +1318,13 @@ export default function ZineMachine() {
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, [ctxMenu]);
+
+  useEffect(() => {
+    if (!jointCtxMenu) return;
+    const close = () => setJointCtxMenu(null);
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [jointCtxMenu]);
 
   // ---- Derived: board-hole index of parts ----
   const partHolesByGrid = useMemo(() => {
@@ -1252,8 +1399,8 @@ export default function ZineMachine() {
             preserveAspectRatio="xMidYMid meet"
             onPointerDown={handleSvgDown}
             onPointerMove={handleSvgMove}
-            onPointerUp={handleSvgUp}
-            onPointerLeave={handleSvgUp}
+            onPointerUp={(e) => handleSvgUp(e)}
+            onPointerLeave={(e) => handleSvgUp(e)}
             onContextMenu={(e) => e.preventDefault()}
             style={{
               cursor:
@@ -1315,7 +1462,11 @@ export default function ZineMachine() {
 
             {/* Parts */}
             <g>
-              {[...displayParts].sort((a, b) => (a.type === "motor" ? -1 : 0) - (b.type === "motor" ? -1 : 0)).map(p => (
+              {[...displayParts].sort((a, b) => {
+                const za = (a.zIndex ?? 0) + (a.type === "motor" ? -1000 : 0);
+                const zb = (b.zIndex ?? 0) + (b.type === "motor" ? -1000 : 0);
+                return za - zb;
+              }).map(p => (
                 <g
                   key={p.id}
                   style={{ cursor: st.mode === "play" ? "default" : st.tool === "select" ? "grab" : (st.tool === "delete" ? "not-allowed" : "default") }}
@@ -1357,6 +1508,34 @@ export default function ZineMachine() {
               />
             )}
 
+            {/* Pivot hole options for selected strip */}
+            {selectedPart && st.mode === "build" && st.tool === "select" &&
+              (selectedPart.type === "strip" || selectedPart.type === "slottedStrip") && (
+              <g pointerEvents="all">
+                {getPivotHoleOptions(selectedPart).map(hIdx => {
+                  const wh = worldHoles(selectedPart)[hIdx];
+                  if (!wh) return null;
+                  const isActive = (selectedPart.pivotHoleIdx ?? 0) === hIdx;
+                  const isHov = hoverPivotHole?.partId === selectedPart.id && hoverPivotHole?.holeIdx === hIdx;
+                  return (
+                    <circle
+                      key={hIdx}
+                      cx={wh.x * GRID} cy={wh.y * GRID}
+                      r={isActive ? 7 : isHov ? 6 : 5}
+                      fill={isActive ? COLORS.select : isHov ? COLORS.select + "99" : "rgba(255,210,63,0.25)"}
+                      stroke={COLORS.select}
+                      strokeWidth="1.5"
+                      style={{ cursor: "pointer" }}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        dispatch({ type: "UPDATE_PART", id: selectedPart.id, updates: { pivotHoleIdx: hIdx } });
+                      }}
+                    />
+                  );
+                })}
+              </g>
+            )}
+
             {/* Ghost preview for placement */}
             {ghostPart && (
               <g pointerEvents="none">
@@ -1378,6 +1557,18 @@ export default function ZineMachine() {
                       jx = wh.x; jy = wh.y;
                     }
                   }
+                } else {
+                  // Build mode: render at closest hole of first connected part for alignment
+                  let bestD = 2;
+                  for (const pid of j.partIds) {
+                    const pp = st.parts.find(p => p.id === pid);
+                    if (!pp) continue;
+                    for (const wh of worldHoles(pp)) {
+                      const d = Math.hypot(wh.x - j.x, wh.y - j.y);
+                      if (d < bestD) { bestD = d; jx = wh.x; jy = wh.y; }
+                    }
+                    break;
+                  }
                 }
                 return (
                   <JointPin
@@ -1385,9 +1576,15 @@ export default function ZineMachine() {
                     joint={j}
                     overrideX={jx}
                     overrideY={jy}
-                    onClick={(e) => handleJointClick(e, j)}
+                    onPointerDown={(e) => handleJointDown(e, j)}
                     deletable={st.tool === "delete" && st.mode === "build"}
                     selected={j.id === selectedJointId && st.mode === "build"}
+                    onContextMenu={(e) => {
+                      if (st.mode !== "build") return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setJointCtxMenu({ x: e.clientX, y: e.clientY, joint: j });
+                    }}
                   />
                 );
               })}
@@ -1419,8 +1616,23 @@ export default function ZineMachine() {
               onClose={() => setCtxMenu(null)}
               onAction={(type, updates) => {
                 if (type === "DELETE_PART") dispatch({ type, id: ctxMenu.part.id });
+                else if (type === "BRING_FORWARD") dispatch({ type, id: ctxMenu.part.id });
+                else if (type === "SEND_BACKWARD") dispatch({ type, id: ctxMenu.part.id });
                 else dispatch({ type, id: ctxMenu.part.id, updates });
                 setCtxMenu(null);
+              }}
+            />
+          )}
+
+          {/* Joint right-click menu */}
+          {jointCtxMenu && (
+            <JointContextMenu
+              x={jointCtxMenu.x} y={jointCtxMenu.y} joint={jointCtxMenu.joint}
+              onClose={() => setJointCtxMenu(null)}
+              onAction={(type, payload) => {
+                if (type === "DELETE_JOINT") dispatch({ type, id: jointCtxMenu.joint.id });
+                else if (type === "CONVERT_JOINT") dispatch({ type, id: jointCtxMenu.joint.id, kind: payload.kind });
+                setJointCtxMenu(null);
               }}
             />
           )}
@@ -1435,13 +1647,15 @@ export default function ZineMachine() {
 // ---------- Context menu ----------
 function ContextMenu({ x, y, part, onClose, onAction }) {
   const isStrip = part.type === "strip" || part.type === "slottedStrip";
-  const canExtend = isStrip && part.size < 8;
+  const canExtend = isStrip && part.size < 12;
   const canReduce = isStrip && part.size > 2;
 
   const items = [
-    { label: "Delete", action: () => onAction("DELETE_PART") },
+    { label: "Delete", danger: true, action: () => onAction("DELETE_PART") },
     canExtend && { label: "Extend strip +1", action: () => onAction("UPDATE_PART", { size: part.size + 1 }) },
     canReduce && { label: "Reduce strip −1", action: () => onAction("UPDATE_PART", { size: part.size - 1 }) },
+    { label: "Bring Forward", action: () => onAction("BRING_FORWARD") },
+    (part.zIndex ?? 0) > 0 && { label: "Send Backward", action: () => onAction("SEND_BACKWARD") },
   ].filter(Boolean);
 
   return (
@@ -1461,7 +1675,45 @@ function ContextMenu({ x, y, part, onClose, onAction }) {
           key={i}
           onClick={item.action}
           className="w-full text-left px-3 py-1.5 mono text-xs tool-btn"
-          style={{ color: item.label === "Delete" ? COLORS.weld : COLORS.ink, background: "transparent", display: "block" }}
+          style={{ color: item.danger ? COLORS.weld : COLORS.ink, background: "transparent", display: "block" }}
+          onMouseEnter={(e) => e.currentTarget.style.background = COLORS.shellDeep}
+          onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---------- Joint context menu ----------
+function JointContextMenu({ x, y, joint, onClose, onAction }) {
+  const otherKinds = ["pivot", "weld", "ground"].filter(k => k !== joint.kind);
+  const items = [
+    { label: "Delete joint", danger: true, action: () => onAction("DELETE_JOINT") },
+    ...otherKinds.map(k => ({
+      label: `Convert to ${k}`,
+      action: () => onAction("CONVERT_JOINT", { kind: k }),
+    })),
+  ];
+  return (
+    <div
+      className="absolute z-50 py-1 rounded shadow-lg"
+      style={{
+        left: x, top: y,
+        background: COLORS.sidebar,
+        border: `1px solid ${COLORS.divider}`,
+        minWidth: 160,
+        transform: "translate(4px, 4px)",
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      {items.map((item, i) => (
+        <button
+          key={i}
+          onClick={item.action}
+          className="w-full text-left px-3 py-1.5 mono text-xs tool-btn"
+          style={{ color: item.danger ? COLORS.weld : COLORS.ink, background: "transparent", display: "block" }}
           onMouseEnter={(e) => e.currentTarget.style.background = COLORS.shellDeep}
           onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
         >
@@ -1473,7 +1725,7 @@ function ContextMenu({ x, y, part, onClose, onAction }) {
 }
 
 // ---------- Joint pin ----------
-function JointPin({ joint, onClick, deletable, overrideX, overrideY, selected }) {
+function JointPin({ joint, onPointerDown, deletable, overrideX, overrideY, selected, onContextMenu }) {
   const cx = (overrideX !== undefined ? overrideX : joint.x) * GRID;
   const cy = (overrideY !== undefined ? overrideY : joint.y) * GRID;
   const color =
@@ -1481,7 +1733,7 @@ function JointPin({ joint, onClick, deletable, overrideX, overrideY, selected })
     joint.kind === "weld" ? COLORS.weld :
     COLORS.ground;
   return (
-    <g style={{ cursor: deletable ? "not-allowed" : "pointer" }} onPointerDown={onClick}>
+    <g style={{ cursor: deletable ? "not-allowed" : "pointer" }} onPointerDown={onPointerDown} onContextMenu={onContextMenu}>
       {selected && (
         <circle cx={cx} cy={cy} r={JOINT_R + 6}
           fill="none" stroke={COLORS.select} strokeWidth="2" strokeDasharray="4 3" opacity="0.9" />
@@ -1521,7 +1773,10 @@ function RotationHandle({ part, onPointerDown }) {
   const rotated = rotate(local, part.rotation);
   const cx = (part.x + rotated.x) * GRID;
   const cy = (part.y + rotated.y) * GRID;
-  const ax = part.x * GRID, ay = part.y * GRID;
+  const pivotIdx = part.pivotHoleIdx ?? 0;
+  const pivotWH = worldHoles(part)[pivotIdx];
+  const ax = pivotWH ? pivotWH.x * GRID : part.x * GRID;
+  const ay = pivotWH ? pivotWH.y * GRID : part.y * GRID;
   return (
     <g>
       <line x1={ax} y1={ay} x2={cx} y2={cy} stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="3 3" opacity="0.8" />
