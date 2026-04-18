@@ -46,28 +46,18 @@ const COLORS = {
 };
 
 const PALETTE = [
-  { id: "strip2",  type: "strip", size: 2 },
   { id: "strip3",  type: "strip", size: 3 },
-  { id: "strip4",  type: "strip", size: 4 },
   { id: "strip5",  type: "strip", size: 5 },
-  { id: "strip6",  type: "strip", size: 6 },
   { id: "strip7",  type: "strip", size: 7 },
-  { id: "strip8",  type: "strip", size: 8 },
   { id: "strip9",  type: "strip", size: 9 },
-  { id: "strip10", type: "strip", size: 10 },
   { id: "strip11", type: "strip", size: 11 },
-  { id: "strip12", type: "strip", size: 12 },
-  { id: "slot2",   type: "slottedStrip", size: 2 },
+  { id: "strip13", type: "strip", size: 13 },
   { id: "slot3",   type: "slottedStrip", size: 3 },
-  { id: "slot4",   type: "slottedStrip", size: 4 },
   { id: "slot5",   type: "slottedStrip", size: 5 },
-  { id: "slot6",   type: "slottedStrip", size: 6 },
   { id: "slot7",   type: "slottedStrip", size: 7 },
-  { id: "slot8",   type: "slottedStrip", size: 8 },
   { id: "slot9",   type: "slottedStrip", size: 9 },
-  { id: "slot10",  type: "slottedStrip", size: 10 },
   { id: "slot11",  type: "slottedStrip", size: 11 },
-  { id: "slot12",  type: "slottedStrip", size: 12 },
+  { id: "slot13",  type: "slottedStrip", size: 13 },
   { id: "triangle", type: "triangle" },
   { id: "square",   type: "square" },
   { id: "pentagon", type: "pentagon" },
@@ -418,6 +408,18 @@ function MotorShape({ part, ghost = false }) {
   const outerHoles = holes.slice(1); // skip center
   const R = 2.5 * GRID;
   const hubR = 0.55 * GRID;
+  const dir = part.direction ?? 1; // 1=CW, -1=CCW
+  // Direction arrow arc: 100° arc in upper half
+  const arrowR = 1.35 * GRID;
+  const sa = (dir === 1 ? -110 : -70) * Math.PI / 180;
+  const ea = (dir === 1 ? -10 : -170) * Math.PI / 180;
+  const sweep = dir === 1 ? 1 : 0;
+  const sx = arrowR * Math.cos(sa), sy = arrowR * Math.sin(sa);
+  const ex = arrowR * Math.cos(ea), ey = arrowR * Math.sin(ea);
+  // Tangent direction at arc endpoint (CW: rotate radius 90° in CW dir)
+  const tx = -dir * Math.sin(ea), ty = dir * Math.cos(ea);
+  const backAngle = Math.atan2(-ty, -tx);
+  const ah = 7;
   return (
     <g opacity={ghost ? 0.45 : 1}>
       <circle cx={0} cy={0} r={R} fill={COLORS.motor} stroke={COLORS.partEdge} strokeWidth="1.6" />
@@ -427,6 +429,15 @@ function MotorShape({ part, ghost = false }) {
       ))}
       <circle cx={0} cy={0} r={hubR} fill={COLORS.partEdge} />
       <circle cx={0} cy={0} r={hubR * 0.4} fill={COLORS.motor} />
+      {/* Direction arrow */}
+      <path
+        d={`M ${sx} ${sy} A ${arrowR} ${arrowR} 0 0 ${sweep} ${ex} ${ey}`}
+        fill="none" stroke={COLORS.partEdge} strokeWidth="2.2" strokeLinecap="round" opacity="0.75"
+      />
+      <path
+        d={`M ${ex + ah * Math.cos(backAngle + 0.45)} ${ey + ah * Math.sin(backAngle + 0.45)} L ${ex} ${ey} L ${ex + ah * Math.cos(backAngle - 0.45)} ${ey + ah * Math.sin(backAngle - 0.45)}`}
+        fill="none" stroke={COLORS.partEdge} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" opacity="0.75"
+      />
       {holes.map((h, i) => (
         <circle key={i} cx={h.x * GRID} cy={h.y * GRID} r={HOLE_R_PART} fill={COLORS.partHole} />
       ))}
@@ -744,7 +755,8 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     if (part.type !== "motor") continue;
-    const newRot = part.rotation + MOTOR_SPEED_DEG * dt;
+    const motorSpeed = (part.speed ?? MOTOR_SPEED_DEG) * (part.direction ?? 1);
+    const newRot = part.rotation + motorSpeed * dt;
     const g = groundByPart.get(part.id);
     let pivotX = part.x, pivotY = part.y, pivotHoleIdx = 0;
     if (g) { pivotX = g.x; pivotY = g.y; pivotHoleIdx = g.holeIdx; }
@@ -1668,15 +1680,25 @@ export default function ZineMachine() {
 // ---------- Context menu ----------
 function ContextMenu({ x, y, part, onClose, onAction }) {
   const isStrip = part.type === "strip" || part.type === "slottedStrip";
-  const canExtend = isStrip && part.size < 12;
+  const isMotor = part.type === "motor";
+  const canExtend = isStrip && part.size < 15;
   const canReduce = isStrip && part.size > 2;
+  const curSpeed = part.speed ?? MOTOR_SPEED_DEG;
+  const curDir = part.direction ?? 1;
 
   const items = [
     { label: "Delete", danger: true, action: () => onAction("DELETE_PART") },
-    canExtend && { label: "Extend strip +1", action: () => onAction("UPDATE_PART", { size: part.size + 1 }) },
-    canReduce && { label: "Reduce strip −1", action: () => onAction("UPDATE_PART", { size: part.size - 1 }) },
-    { label: "Bring Forward", action: () => onAction("BRING_FORWARD") },
-    (part.zIndex ?? 0) > 0 && { label: "Send Backward", action: () => onAction("SEND_BACKWARD") },
+    canExtend && { label: "Extend +1", action: () => onAction("UPDATE_PART", { size: part.size + 1 }) },
+    canReduce && { label: "Reduce −1", action: () => onAction("UPDATE_PART", { size: part.size - 1 }) },
+    !isMotor && { label: "Bring Forward", action: () => onAction("BRING_FORWARD") },
+    !isMotor && (part.zIndex ?? 0) > 0 && { label: "Send Backward", action: () => onAction("SEND_BACKWARD") },
+    isMotor && { separator: true },
+    isMotor && { label: curDir === 1 ? "↺ Set Counter-clockwise" : "↻ Set Clockwise", action: () => onAction("UPDATE_PART", { direction: curDir === 1 ? -1 : 1 }) },
+    isMotor && { separator: true },
+    isMotor && { label: `Slow — 45°/s${curSpeed === 45 ? "  ✓" : ""}`,  action: () => onAction("UPDATE_PART", { speed: 45 }) },
+    isMotor && { label: `Normal — 90°/s${curSpeed === 90 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 90 }) },
+    isMotor && { label: `Fast — 180°/s${curSpeed === 180 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 180 }) },
+    isMotor && { label: `Very Fast — 360°/s${curSpeed === 360 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 360 }) },
   ].filter(Boolean);
 
   return (
@@ -1691,18 +1713,22 @@ function ContextMenu({ x, y, part, onClose, onAction }) {
       }}
       onPointerDown={(e) => e.stopPropagation()}
     >
-      {items.map((item, i) => (
-        <button
-          key={i}
-          onClick={item.action}
-          className="w-full text-left px-3 py-1.5 mono text-xs tool-btn"
-          style={{ color: item.danger ? COLORS.weld : COLORS.ink, background: "transparent", display: "block" }}
-          onMouseEnter={(e) => e.currentTarget.style.background = COLORS.shellDeep}
-          onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
-        >
-          {item.label}
-        </button>
-      ))}
+      {items.map((item, i) =>
+        item.separator
+          ? <div key={i} style={{ height: 1, background: COLORS.divider, margin: "3px 0" }} />
+          : (
+          <button
+            key={i}
+            onClick={item.action}
+            className="w-full text-left px-3 py-1.5 mono text-xs tool-btn"
+            style={{ color: item.danger ? COLORS.weld : COLORS.ink, background: "transparent", display: "block" }}
+            onMouseEnter={(e) => e.currentTarget.style.background = COLORS.shellDeep}
+            onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+          >
+            {item.label}
+          </button>
+        )
+      )}
     </div>
   );
 }
