@@ -169,8 +169,7 @@ function partLabel(p) {
 
 function getPivotHoleOptions(part) {
   if (part.type !== "strip" && part.type !== "slottedStrip") return [];
-  const n = part.size;
-  return [...new Set([0, Math.floor((n - 1) / 2), n - 1])];
+  return [0, part.size - 1];
 }
 
 function roundedPolygonPath(verts, r) {
@@ -757,6 +756,20 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
   // Step 1b: Exact kinematic solve for motor→free→grounded chains — no drift, no iteration
   solveKinematicChains(parts, joints, constraintMap, groundByPart);
 
+  // Parts directly connected to a motor (the cranks): treated as authoritative in PBD
+  const motorConnectedIds = new Set();
+  for (const j of joints) {
+    if (j.kind === "ground") continue;
+    const cm = constraintMap.get(j.id);
+    if (!cm || cm.length < 2) continue;
+    const hasMotor = cm.some(e => parts.find(p => p.id === e.partId)?.type === "motor");
+    if (hasMotor) {
+      for (const e of cm) {
+        if (parts.find(p => p.id === e.partId)?.type !== "motor") motorConnectedIds.add(e.partId);
+      }
+    }
+  }
+
   // Step 2: Constraint iterations
   for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
     for (const joint of sortedJoints) {
@@ -850,11 +863,19 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
               parts[idxB] = solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, tgt.x, tgt.y);
             }
           } else {
-            // Both free: midpoint PBD
-            const tX = (whA.x + whB.x) / 2;
-            const tY = (whA.y + whB.y) / 2;
-            parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, tX, tY);
-            parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, tX, tY);
+            // Both free: motor-connected part is authoritative — other follows it exactly
+            const aMC = motorConnectedIds.has(entA.partId);
+            const bMC = motorConnectedIds.has(entB.partId);
+            if (aMC && !bMC) {
+              parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, whA.x, whA.y);
+            } else if (bMC && !aMC) {
+              parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, whB.x, whB.y);
+            } else {
+              const tX = (whA.x + whB.x) / 2;
+              const tY = (whA.y + whB.y) / 2;
+              parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, tX, tY);
+              parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, tX, tY);
+            }
           }
         }
       }
