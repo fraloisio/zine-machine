@@ -851,15 +851,21 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
               ? solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y)
               : applyPositionConstraint(parts[idxA], entA.holeIdx, whB.x, whB.y);
           } else if (bGrounded && !aGrounded) {
-            // B grounded: solve B toward A's hole, then pull A toward B's result (bidirectional)
+            // B grounded: solve B toward A's hole.
+            // Only pull A back if it's not motor-connected (motor-connected parts are authoritative).
             parts[idxB] = solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, whA.x, whA.y);
-            const newWhB = simWorldHole(parts[idxB], entB.holeIdx);
-            parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, newWhB.x, newWhB.y);
+            if (!motorConnectedIds.has(entA.partId)) {
+              const newWhB = simWorldHole(parts[idxB], entB.holeIdx);
+              parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, newWhB.x, newWhB.y);
+            }
           } else if (aGrounded && !bGrounded) {
-            // A grounded: solve A toward B's hole, then pull B toward A's result (bidirectional)
+            // A grounded: solve A toward B's hole.
+            // Only pull B back if it's not motor-connected.
             parts[idxA] = solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y);
-            const newWhA = simWorldHole(parts[idxA], entA.holeIdx);
-            parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, newWhA.x, newWhA.y);
+            if (!motorConnectedIds.has(entB.partId)) {
+              const newWhA = simWorldHole(parts[idxA], entA.holeIdx);
+              parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, newWhA.x, newWhA.y);
+            }
           } else if (aGrounded && bGrounded) {
             // Both parts grounded — exact circle-circle intersection
             const locsA = getLocalHoles(parts[idxA]);
