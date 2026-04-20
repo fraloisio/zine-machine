@@ -40,6 +40,7 @@ function getAudioCtx() {
 function playNote(freq) {
   try {
     const ctx = getAudioCtx();
+    if (ctx.state === 'suspended') ctx.resume();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain); gain.connect(ctx.destination);
