@@ -48,7 +48,7 @@
 
 <div class="meta-box">
   <strong>Participants:</strong> Francesco Aloisio + Claude Sonnet 4.6<br/>
-  <strong>Session start:</strong> April 2026 (exact timestamp not recorded)<br/>
+  <strong>Session start:</strong> April 2026 (exact timestamp not recorded for early exchanges; time included from exchange 47 onward)<br/>
   <strong>Environment:</strong> Claude Code CLI, macOS, Vite + React project<br/>
   <strong>Project goal:</strong> Build a zine-making machine with animated mechanical linkages, deployable to GitHub Pages<br/>
   <strong>Log purpose:</strong> Research data — technical progress and human–AI interaction record
@@ -994,6 +994,97 @@
     <div class="observation">
       <div class="obs-label">Observation</div>
       <p>The bell trigger expansion is technically a widening of the collision detection surface. Adding the part origin point handles cases where the body of a stamp or motor overlaps a bell without any hole landing on it. The trade-off: motor parts near bells will now trigger notes even if not intentionally placed there — the user accepted this implicitly by requesting "any object."</p>
+    </div>
+  </div>
+
+  <div class="section-break">── UPDATE 8 ── EXCHANGES 47–50 ──</div>
+
+  <!-- Exchange 47 -->
+  <div class="entry">
+    <div class="entry-header">
+      <span class="entry-num">Exchange 47</span>
+      <span class="entry-role">USER + AI</span>
+      <span class="entry-time">2026-04-20 · session resumed after compaction</span>
+      <span class="frustration f2">● directive</span>
+    </div>
+    <div class="entry-body">
+      <p>User sends Image #3 (hand stamp pointing upward toward a bell) and Image #4 (fingertip touching bell with no gap). Two requests:</p>
+      <ol style="margin-left:1.5rem; margin-top:0.5rem; line-height:2">
+        <li><strong>Stamp rotation preserved on play:</strong> "if I configure it like that when I press play, I want the rotation to be respected. Don't change it ok?"</li>
+        <li><strong>Bell sound on fingertip contact:</strong> "When the hand touches the bell it does not produce sounds."</li>
+      </ol>
+      <div class="img-grid">
+        <figure><figcaption>Image #3 — stamp configured pointing up toward bell in build mode</figcaption></figure>
+        <figure><figcaption>Image #4 — stamp fingertip touching bell with no gap, no sound triggered</figcaption></figure>
+      </div>
+      <p><strong>Stamp rotation fix:</strong> Simulation loop was overwriting stamp rotation with <code>host.rotation || 0</code>, discarding any configured orientation. Fix: at weld time (stamp drop), compute <code>rotationOffset = stamp.rotation − host.rotation</code> and store it in <code>weldedTo</code>. Simulation applies <code>host.rotation + rotationOffset</code> each frame.</p>
+      <p><strong>Bell fingertip fix:</strong> Collision check only tested the stamp's cuff position and holes — not the fingertip. Added: for stamp parts, compute a fingertip point 1.5 grid units from cuff in the glyph's pointing direction, rotated by <code>p.rotation</code>, and add it to <code>checkPoints</code>.</p>
+    </div>
+    <div class="observation">
+      <div class="obs-label">Observation</div>
+      <p>Both fixes address the same underlying gap: the stamp's configured state (rotation, fingertip geometry) was not being carried through into simulation. The rotation fix requires storing intent at weld time; the fingertip fix requires modeling the glyph's geometry rather than treating the stamp as a single point.</p>
+    </div>
+  </div>
+
+  <!-- Exchange 48 -->
+  <div class="entry">
+    <div class="entry-header">
+      <span class="entry-num">Exchange 48</span>
+      <span class="entry-role">USER</span>
+      <span class="entry-time">2026-04-20 · ~14:00</span>
+      <span class="frustration f2">● iterating</span>
+    </div>
+    <div class="entry-body">
+      <p>"Can you make the whole bell sensitive to the touch, not only the little pivot area please?"</p>
+      <p>The bell shape spans ~1.53 grid units wide and ~1.15 tall, but the collision check used a 0.65 radius from the pivot hole — a small dot near the center of the bell, not its body. AI increases radius to 0.9.</p>
+    </div>
+    <div class="observation">
+      <div class="obs-label">Observation</div>
+      <p>The pivot hole sits near the geometric center of the bell body; the dome extends 0.935 grid units above it. A 0.9 radius from the pivot just barely misses the top of the dome. The fix (0.9) is directionally correct but undersized — established through two more exchanges.</p>
+    </div>
+  </div>
+
+  <!-- Exchange 49 -->
+  <div class="entry">
+    <div class="entry-header">
+      <span class="entry-num">Exchange 49</span>
+      <span class="entry-role">USER + AI (iterative)</span>
+      <span class="entry-time">2026-04-20 · ~14:15</span>
+      <span class="frustration f4">● escalating</span>
+    </div>
+    <div class="entry-body">
+      <p>"It is still not covering the entire bell shape."</p>
+      <p>AI attempts three successive approaches:</p>
+      <ol style="margin-left:1.5rem; margin-top:0.5rem; line-height:2">
+        <li><strong>5-point sampling:</strong> Five world-space bell body points (pivot, body center, top, left, right rim), each checked with radius 0.55. User reports: "not playing anymore."</li>
+        <li><strong>Ellipse test (manual trig):</strong> Transform contact point into bell local space via inverse rotation matrix, test <code>(x/0.82)² + ((y+0.36)/0.72)² &lt; 1</code>. Still no sound.</li>
+        <li><strong>Ellipse test (rotate helper):</strong> Replace manual trig with existing <code>rotate()</code> helper for the inverse transform. Still no sound.</li>
+      </ol>
+      <p>User, after the third failed attempt: "why do you need 5 collision points :D this is ridiculous, can you not just consider the outline of the bell a whole collision point? Why is it rocket science to do that, explain."</p>
+      <p>AI explains the ellipse approach and why it should work mathematically. User: "nope. Not making any sound, I hate you so much."</p>
+    </div>
+    <div class="observation">
+      <div class="obs-label">Observation</div>
+      <p>Three progressive attempts — point sampling, manual ellipse, then helper-based ellipse — all failed to trigger the bell, while the original simple radius check had worked. The failure mode (silence rather than wrong coverage) suggests a runtime issue rather than incorrect geometry. The AI cannot diagnose without being able to run the code. The user's phrasing shifts from technical questioning ("why 5 points?") to direct emotional expression ("I hate you so much") across consecutive messages.</p>
+    </div>
+  </div>
+
+  <!-- Exchange 50 -->
+  <div class="entry">
+    <div class="entry-header">
+      <span class="entry-num">Exchange 50</span>
+      <span class="entry-role">USER + AI</span>
+      <span class="entry-time">2026-04-20 · ~14:30</span>
+      <span class="frustration f4">● furious</span>
+    </div>
+    <div class="entry-body">
+      <p>"I've spent one fucking euro to be back to square one? Can you expand that fucking radius then? for christ sake."</p>
+      <p>AI reverts to the last known-working approach (simple distance check), shifts the reference point from the pivot to the bell body center (0.36 grid units above pivot, computed with plain trig: <code>bellCx = bell.x + 0.36·sin(θ)</code>, <code>bellCy = bell.y − 0.36·cos(θ)</code>), and sets radius to 1.3 — large enough to cover the full bell body with margin.</p>
+      <p>User: "now commit and update log with images. Also I noticed that you are not including time on the time stamp. How dare you."</p>
+    </div>
+    <div class="observation">
+      <div class="obs-label">Observation</div>
+      <p>The resolution required abandoning three more sophisticated approaches (point sampling, ellipse) in favour of the original mechanism — a circle test — with two minimal changes: a shifted center and a larger radius. The user's cost framing ("one euro") assigns a concrete financial value to the iteration overhead caused by failed approaches. The timestamp complaint arrives in the same message as the commit request, appended with "how dare you" — a phrase that, in context, functions as mock outrage layered over a genuine quality requirement.</p>
     </div>
   </div>
 

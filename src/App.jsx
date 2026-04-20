@@ -1284,18 +1284,29 @@ export default function ZineMachine() {
           if (!host) return stamp;
           const wh = worldHoles(host)[stamp.weldedTo.holeIdx];
           if (!wh) return stamp;
-          return { ...stamp, x: wh.x, y: wh.y, rotation: host.rotation || 0 };
+          const rotOffset = stamp.weldedTo.rotationOffset ?? 0;
+          return { ...stamp, x: wh.x, y: wh.y, rotation: (host.rotation || 0) + rotOffset };
         });
         setSimJammed(jammed);
         // Bell collision detection
         const bellParts = initParts.filter(p => p.type === "bell");
         for (const bell of bellParts) {
+          // Bell body center is 0.36 grid units above pivot in bell-local space
+          const bellRad = (bell.rotation || 0) * Math.PI / 180;
+          const bellCx = bell.x + 0.36 * Math.sin(bellRad);
+          const bellCy = bell.y - 0.36 * Math.cos(bellRad);
+          const inBell = (pt) => Math.hypot(pt.x - bellCx, pt.y - bellCy) < 1.3;
           let anyHit = false;
           for (const p of cur) {
             if (p.type === "bell") continue;
             const checkPoints = [{ x: p.x, y: p.y }, ...worldHoles(p)];
+            if (p.type === "stamp") {
+              const tipDir = p.glyph === "☜" ? -1 : 1;
+              const tip = rotate({ x: tipDir * 1.5, y: 0 }, p.rotation || 0);
+              checkPoints.push({ x: p.x + tip.x, y: p.y + tip.y });
+            }
             for (const pt of checkPoints) {
-              if (Math.hypot(pt.x - bell.x, pt.y - bell.y) < 0.65) { anyHit = true; break; }
+              if (inBell(pt)) { anyHit = true; break; }
             }
             if (anyHit) break;
           }
@@ -1578,7 +1589,14 @@ export default function ZineMachine() {
     // Apply stamp weld on drop
     if (drag?.kind === "move" && drag.origPart?.type === "stamp") {
       const wt = stampWeldRef.current;
-      dispatch({ type: "UPDATE_PART", id: drag.id, updates: { weldedTo: wt ?? null } });
+      let weldData = wt ?? null;
+      if (wt) {
+        const stamp = st.parts.find(p => p.id === drag.id);
+        const host = st.parts.find(p => p.id === wt.partId);
+        const rotationOffset = (stamp?.rotation || 0) - (host?.rotation || 0);
+        weldData = { ...wt, rotationOffset };
+      }
+      dispatch({ type: "UPDATE_PART", id: drag.id, updates: { weldedTo: weldData } });
       stampWeldRef.current = null;
     }
     setDrag(null);
