@@ -1,7 +1,8 @@
 import { useReducer, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
-  MousePointer2, Trash2, Undo2, Redo2, Hammer, Play, Pause,
-  Anchor, Link2, Circle as CircleIcon, Info, Music, Waves, Sparkles
+  MousePointer2, Move, Trash2, Undo2, Redo2, Hammer, Play, Pause,
+  Anchor, Link2, Circle as CircleIcon, Info, Music, Waves, Sparkles,
+  Bell, ChevronRight, AlignJustify, AlertTriangle, Hand
 } from "lucide-react";
 
 /* ============================================================
@@ -11,17 +12,43 @@ import {
 
 // ---------- Constants ----------
 const GRID = 28;                   // px per grid cell
-const COLS = 30;
-const ROWS = 20;
+const SECTION_COLS = 30;
+const SECTION_ROWS = 20;
+const COLS = SECTION_COLS * 3;
+const ROWS = SECTION_ROWS * 3;
 const STRIP_W = 0.72;              // strip width in grid units
 const HOLE_R_PART = 2.8;           // hole radius on parts
-const HOLE_R_BOARD = 1.8;          // hole radius on the board
+const HOLE_R_BOARD = 1.8;  // pegboard dot radius
 const JOINT_R = 8;                 // joint pin radius
 const ANGLE_SNAP = 15;             // degrees
 const BOARD_PAD = 0.7;             // grid units of padding around the board
 const MAX_HISTORY = 80;
 const SELECT_STROKE = 2.5;         // dashed halo stroke width
 const MOTOR_SPEED_DEG = 90;        // degrees per second
+
+// Bell instrument notes
+const NOTES = {
+  'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'F4': 349.23,
+  'G4': 392.00, 'A4': 440.00, 'B4': 493.88, 'C5': 523.25,
+};
+
+let _audioCtx = null;
+function getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
+function playNote(freq) {
+  try {
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = freq; osc.type = 'sine';
+    gain.gain.setValueAtTime(0.45, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.4);
+    osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 1.4);
+  } catch (_) {}
+}
 
 const COLORS = {
   shell:       "#1a0f14",
@@ -46,22 +73,15 @@ const COLORS = {
 };
 
 const PALETTE = [
-  { id: "strip3",  type: "strip", size: 3 },
-  { id: "strip5",  type: "strip", size: 5 },
-  { id: "strip7",  type: "strip", size: 7 },
-  { id: "strip9",  type: "strip", size: 9 },
-  { id: "strip11", type: "strip", size: 11 },
-  { id: "strip13", type: "strip", size: 13 },
-  { id: "slot3",   type: "slottedStrip", size: 3 },
-  { id: "slot5",   type: "slottedStrip", size: 5 },
-  { id: "slot7",   type: "slottedStrip", size: 7 },
-  { id: "slot9",   type: "slottedStrip", size: 9 },
-  { id: "slot11",  type: "slottedStrip", size: 11 },
-  { id: "slot13",  type: "slottedStrip", size: 13 },
+  { id: "strip",    type: "strip" },
+  { id: "slot",     type: "slottedStrip" },
   { id: "triangle", type: "triangle" },
   { id: "square",   type: "square" },
   { id: "pentagon", type: "pentagon" },
   { id: "motor",    type: "motor" },
+  { id: "bell",          type: "bell" },
+  { id: "finger-right", type: "stamp", glyph: "☞" },
+  { id: "finger-left",  type: "stamp", glyph: "☜" },
 ];
 
 // ---------- Geometry ----------
@@ -101,6 +121,9 @@ function getLocalHoles(part) {
         { x: 0, y: 0 },
         { x: 2, y: 0 }, { x: 0, y: 2 }, { x: -2, y: 0 }, { x: 0, y: -2 },
       ];
+    case "bell":
+    case "stamp":
+      return [{ x: 0, y: 0 }];
     default: return [];
   }
 }
@@ -233,10 +256,18 @@ function reducer(state, action) {
       };
     }
     case "UPDATE_PART_LIVE": {
-      // non-snapshotting: used during drag / rotate gestures
       return {
         ...state,
         parts: state.parts.map(p => p.id === action.id ? { ...p, ...action.updates } : p),
+      };
+    }
+    case "BATCH_UPDATE_PARTS_LIVE": {
+      return {
+        ...state,
+        parts: state.parts.map(p => {
+          const upd = action.updates[p.id];
+          return upd ? { ...p, ...upd } : p;
+        }),
       };
     }
     case "SNAPSHOT": {
@@ -249,6 +280,18 @@ function reducer(state, action) {
         parts: state.parts.filter(p => p.id !== action.id),
         joints: state.joints.filter(j => !j.partIds.includes(action.id)),
         selectedId: state.selectedId === action.id ? null : state.selectedId,
+      };
+    }
+    case "DUPLICATE_PART": {
+      const src = state.parts.find(p => p.id === action.id);
+      if (!src) return state;
+      const newPart = { ...src, id: "p" + state.nextId, x: src.x + 1, y: src.y + 1 };
+      return {
+        ...state,
+        ...snap(state),
+        parts: [...state.parts, newPart],
+        nextId: state.nextId + 1,
+        selectedId: newPart.id,
       };
     }
     case "ADD_JOINT": {
@@ -326,6 +369,29 @@ function reducer(state, action) {
         joints: state.joints.map(j => j.id === action.id
           ? { ...j, x: action.x, y: action.y, partIds: action.partIds }
           : j),
+      };
+    }
+    case "LOAD_STATE": {
+      return {
+        ...state,
+        parts: action.data.parts ?? [],
+        joints: action.data.joints ?? [],
+        nextId: action.data.nextId ?? 1,
+        selectedId: null,
+        tool: "select",
+        palette: null,
+        undo: [],
+        redo: [],
+      };
+    }
+    case "DELETE_PARTS": {
+      const ids = new Set(action.ids);
+      return {
+        ...state,
+        ...snap(state),
+        parts: state.parts.filter(p => !ids.has(p.id)),
+        joints: state.joints.filter(j => !j.partIds.some(id => ids.has(id))),
+        selectedId: ids.has(state.selectedId) ? null : state.selectedId,
       };
     }
     default:
@@ -409,17 +475,17 @@ function MotorShape({ part, ghost = false }) {
   const R = 2.5 * GRID;
   const hubR = 0.55 * GRID;
   const dir = part.direction ?? 1; // 1=CW, -1=CCW
-  // Direction arrow arc: 100° arc in upper half
-  const arrowR = 1.35 * GRID;
-  const sa = (dir === 1 ? -110 : -70) * Math.PI / 180;
-  const ea = (dir === 1 ? -10 : -170) * Math.PI / 180;
+  // Arrow arc fits in the NE quadrant (CW) or NW quadrant (CCW) — between the spoke lines
+  const arrowR = 2.1 * GRID;
+  const sa = (dir === 1 ? -75 : -105) * Math.PI / 180;
+  const ea = (dir === 1 ? -30 : -150) * Math.PI / 180;
   const sweep = dir === 1 ? 1 : 0;
   const sx = arrowR * Math.cos(sa), sy = arrowR * Math.sin(sa);
   const ex = arrowR * Math.cos(ea), ey = arrowR * Math.sin(ea);
   // Tangent direction at arc endpoint (CW: rotate radius 90° in CW dir)
   const tx = -dir * Math.sin(ea), ty = dir * Math.cos(ea);
   const backAngle = Math.atan2(-ty, -tx);
-  const ah = 7;
+  const ah = 5;
   return (
     <g opacity={ghost ? 0.45 : 1}>
       <circle cx={0} cy={0} r={R} fill={COLORS.motor} stroke={COLORS.partEdge} strokeWidth="1.6" />
@@ -445,15 +511,75 @@ function MotorShape({ part, ghost = false }) {
   );
 }
 
+function BellShape({ part, ghost = false }) {
+  const s = GRID * 0.85;
+  return (
+    <g opacity={ghost ? 0.45 : 1}>
+      <path
+        d={`M 0 ${-s * 1.1} Q ${s * 0.5} ${-s * 1.0} ${s * 0.9} ${s * 0.25} L ${-s * 0.9} ${s * 0.25} Q ${-s * 0.5} ${-s * 1.0} 0 ${-s * 1.1}`}
+        fill={COLORS.motor} stroke={COLORS.partEdge} strokeWidth="1.4"
+      />
+      <line x1={-s * 0.9} y1={s * 0.25} x2={s * 0.9} y2={s * 0.25} stroke={COLORS.partEdge} strokeWidth="1.4" />
+      <line x1={0} y1={s * 0.25} x2={0} y2={s * 0.55} stroke={COLORS.partEdge} strokeWidth="1.4" />
+      <circle cx={0} cy={s * 0.6} r={3.5} fill={COLORS.partEdge} />
+      <circle cx={0} cy={0} r={HOLE_R_PART} fill={COLORS.partHole} />
+    </g>
+  );
+}
+
+function StampShape({ part, ghost = false }) {
+  const s = GRID * 2.4;
+  const glyph = part.glyph ?? "☞";
+  const isMirror = glyph === "☜";
+  // Shift the glyph so the cuff (wrist end) lands on the pivot hole at (0,0).
+  // ☞ points right → cuff is on the left → shift text rightward.
+  // ☜ points left  → cuff is on the right → shift text leftward.
+  const textX = isMirror ? -s * 0.48 : s * 0.48;
+  const textY = s * 0.38;
+  const fid = `stamp-bg-${part.id ?? 'ghost'}`;
+  return (
+    <g opacity={ghost ? 0.45 : 1}>
+      <defs>
+        <filter id={fid} x="-50%" y="-50%" width="200%" height="200%" colorInterpolationFilters="sRGB">
+          <feMorphology operator="dilate" radius="18" result="d"/>
+          <feMorphology in="d" operator="erode" radius="18" result="closed"/>
+          <feFlood floodColor="white" result="white"/>
+          <feComposite in="white" in2="closed" operator="in"/>
+        </filter>
+      </defs>
+      <text
+        x={textX} y={textY}
+        textAnchor="middle"
+        fontSize={s * 1.4}
+        fontFamily="'Noto Symbols 2', sans-serif"
+        filter={`url(#${fid})`}
+        fill={COLORS.partEdge}
+        pointerEvents="none"
+      >{glyph}</text>
+      <text
+        x={textX} y={textY}
+        textAnchor="middle"
+        fontSize={s * 1.4}
+        fontFamily="'Noto Symbols 2', sans-serif"
+        fill={COLORS.partEdge}
+      >{glyph}</text>
+      {/* Pivot hole at cuff */}
+      <circle cx={0} cy={0} r={HOLE_R_PART} fill={COLORS.partHole} />
+    </g>
+  );
+}
+
 function PartShape({ part, ghost = false, selected = false }) {
   let shape;
   if (part.type === "strip") shape = <StripShape part={part} ghost={ghost} />;
   else if (part.type === "slottedStrip") shape = <SlottedStripShape part={part} ghost={ghost} />;
   else if (part.type === "motor") shape = <MotorShape part={part} ghost={ghost} />;
+  else if (part.type === "bell") shape = <BellShape part={part} ghost={ghost} />;
+  else if (part.type === "stamp") shape = <StampShape part={part} ghost={ghost} />;
   else shape = <PolyShape part={part} ghost={ghost} />;
   return (
     <g transform={`translate(${part.x * GRID},${part.y * GRID}) rotate(${part.rotation})`}>
-      {selected && <SelectionHalo part={part} />}
+      {selected && !ghost && <SelectionHalo part={part} />}
       {shape}
     </g>
   );
@@ -477,6 +603,17 @@ function SelectionHalo({ part }) {
 
 function rotationHandleLocal(part) {
   const holes = getLocalHoles(part);
+  if (part.type === "strip" || part.type === "slottedStrip") {
+    const pivotIdx = part.pivotHoleIdx ?? 0;
+    const pivotHole = holes[pivotIdx] ?? { x: 0, y: 0 };
+    const otherIdx = pivotIdx === 0 ? holes.length - 1 : 0;
+    const otherHole = holes[otherIdx] ?? { x: 1, y: 0 };
+    const dx = otherHole.x - pivotHole.x, dy = otherHole.y - pivotHole.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.001) return { x: 1.1, y: 0 };
+    // Place handle 1.1 grid units past the far end from the pivot
+    return { x: otherHole.x + (dx / len) * 1.1, y: otherHole.y + (dy / len) * 1.1 };
+  }
   const maxD = Math.max(...holes.map(h => Math.hypot(h.x, h.y)));
   return { x: maxD + 1.1, y: 0 };
 }
@@ -487,6 +624,15 @@ function PivotGlyph({ size = 18 }) {
     <svg width={size} height={size} viewBox="-10 -10 20 20">
       <circle cx="0" cy="0" r="8" fill={COLORS.pivot} stroke={COLORS.partEdge} strokeWidth="1.4" />
       <circle cx="0" cy="0" r="2.3" fill={COLORS.partEdge} />
+    </svg>
+  );
+}
+// White/currentColor version for toolbar use
+function PivotIcon({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="-10 -10 20 20">
+      <circle cx="0" cy="0" r="7.5" fill="none" stroke="currentColor" strokeWidth="2" />
+      <circle cx="0" cy="0" r="2.5" fill="currentColor" />
     </svg>
   );
 }
@@ -601,9 +747,11 @@ function circleCircleIntersect(ax, ay, ra, bx, by, rb) {
   ];
 }
 
-// Exact/iterative kinematic solve for motor-driven chains up to 3 links.
-// Handles: motor→crank→grounded (4-bar) and motor→crank→connector→grounded (6-bar segment).
+// General kinematic solver: walks motor-driven chains of arbitrary depth,
+// then cascades through solved grounded intermediates to propagate further.
 function solveKinematicChains(parts, joints, constraintMap, groundByPart) {
+  const solvedIds = new Set();
+
   const localLen = (part, hA, hB) => {
     const hl = getLocalHoles(part);
     return Math.hypot(hl[hA].x - hl[hB].x, hl[hA].y - hl[hB].y);
@@ -614,93 +762,156 @@ function solveKinematicChains(parts, joints, constraintMap, groundByPart) {
     return d0 <= d1 ? sols[0] : sols[1];
   };
 
-  for (const joint of joints) {
-    if (joint.kind === "ground") continue;
-    const cm = constraintMap.get(joint.id);
-    if (!cm || cm.length < 2) continue;
-
-    // Identify motor entry + crank entry
-    const motorEIdx = cm.findIndex(e => parts.find(p => p.id === e.partId)?.type === "motor");
-    if (motorEIdx < 0) continue;
-    const motorE = cm[motorEIdx];
-    const crankE = cm[motorEIdx === 0 ? 1 : 0];
-    const crankId = crankE.partId;
-    const motorPart = parts.find(p => p.id === motorE.partId);
-    const crankPart = parts.find(p => p.id === crankId);
-    if (!motorPart || !crankPart) continue;
-    const A = simWorldHole(motorPart, motorE.holeIdx);
-
-    // Find crank's far joint (not the motor joint)
-    for (const j2 of joints) {
-      if (j2.id === joint.id || j2.kind === "ground") continue;
-      const cm2 = constraintMap.get(j2.id);
-      if (!cm2 || cm2.length < 2) continue;
-      const ck2 = cm2.findIndex(e => e.partId === crankId);
-      if (ck2 < 0) continue;
-      const crankKneeE = cm2[ck2];
-      const nextE = cm2[ck2 === 0 ? 1 : 0];
-      const L1 = localLen(crankPart, crankKneeE.holeIdx, crankE.holeIdx);
-
-      if (groundByPart.has(nextE.partId)) {
-        // ── 2-link chain: motor→crank→grounded coupler ──
-        const couplerPart = parts.find(p => p.id === nextE.partId);
-        if (!couplerPart) break;
-        const gC = groundByPart.get(nextE.partId);
-        const L2 = localLen(couplerPart, nextE.holeIdx, gC.holeIdx);
-        const sols = circleCircleIntersect(A.x, A.y, L1, gC.x, gC.y, L2);
-        if (!sols) break;
-        const knee = closest(sols, simWorldHole(crankPart, crankKneeE.holeIdx));
-        const ci = parts.findIndex(p => p.id === crankId);
-        parts[ci] = solveGroundedPart(crankPart, crankE.holeIdx, A.x, A.y, crankKneeE.holeIdx, knee.x, knee.y);
-        const pi = parts.findIndex(p => p.id === nextE.partId);
-        parts[pi] = solveGroundedPart(couplerPart, gC.holeIdx, gC.x, gC.y, nextE.holeIdx, knee.x, knee.y);
-        break;
-      }
-
-      // Not grounded — check if this connector leads to a grounded output (3-link chain)
-      const connId = nextE.partId;
-      const connPart = parts.find(p => p.id === connId);
-      if (!connPart) break;
-      for (const j3 of joints) {
-        if (j3.id === j2.id || j3.kind === "ground") continue;
-        const cm3 = constraintMap.get(j3.id);
-        if (!cm3 || cm3.length < 2) continue;
-        const ck3 = cm3.findIndex(e => e.partId === connId);
-        if (ck3 < 0) continue;
-        const connKneeE = cm3[ck3];
-        const outputE = cm3[ck3 === 0 ? 1 : 0];
-        if (!groundByPart.has(outputE.partId)) continue;
-        const outputPart = parts.find(p => p.id === outputE.partId);
-        if (!outputPart) continue;
-        const gOut = groundByPart.get(outputE.partId);
-        const G = { x: gOut.x, y: gOut.y };
-        const L2 = localLen(connPart, connKneeE.holeIdx, nextE.holeIdx);
-        const L3 = localLen(outputPart, outputE.holeIdx, gOut.holeIdx);
-
-        // ── 3-link chain: iterative Gauss-Seidel on K1 / K2 ──
-        let K1 = simWorldHole(crankPart, crankKneeE.holeIdx);
-        let K2 = simWorldHole(outputPart, outputE.holeIdx);
-        let ok = true;
-        for (let it = 0; it < 10; it++) {
-          const s2 = circleCircleIntersect(K1.x, K1.y, L2, G.x, G.y, L3);
-          if (!s2) { ok = false; break; }
-          K2 = closest(s2, K2);
-          const s1 = circleCircleIntersect(A.x, A.y, L1, K2.x, K2.y, L2);
-          if (!s1) { ok = false; break; }
-          K1 = closest(s1, K1);
-        }
-        if (!ok) break;
-        const ci = parts.findIndex(p => p.id === crankId);
-        parts[ci] = solveGroundedPart(crankPart, crankE.holeIdx, A.x, A.y, crankKneeE.holeIdx, K1.x, K1.y);
-        const xi = parts.findIndex(p => p.id === connId);
-        parts[xi] = solveGroundedPart(connPart, nextE.holeIdx, K1.x, K1.y, connKneeE.holeIdx, K2.x, K2.y);
-        const oi = parts.findIndex(p => p.id === outputE.partId);
-        parts[oi] = solveGroundedPart(outputPart, gOut.holeIdx, G.x, G.y, outputE.holeIdx, K2.x, K2.y);
-        break;
-      }
-      break;
+  // Index: partId → all non-ground pivot joints containing that part
+  const pjByPart = new Map();
+  for (const j of joints) {
+    if (j.kind === "ground") continue;
+    const cm = constraintMap.get(j.id);
+    if (!cm) continue;
+    for (const e of cm) {
+      if (!pjByPart.has(e.partId)) pjByPart.set(e.partId, []);
+      pjByPart.get(e.partId).push({ joint: j, entry: e });
     }
   }
+
+  // Parts with >1 ground joint are fully fixed — kinematic solver must not move them
+  const groundCount = new Map();
+  for (const j of joints) {
+    if (j.kind !== "ground") continue;
+    const cm = constraintMap.get(j.id);
+    if (!cm) continue;
+    for (const e of cm) groundCount.set(e.partId, (groundCount.get(e.partId) || 0) + 1);
+  }
+  const fullyFixed = new Set([...groundCount.entries()].filter(([, c]) => c > 1).map(([id]) => id));
+
+  // Walk and solve a linear chain starting at (startPartId, inHoleIdx) driven from position A.
+  // Stops when it reaches a grounded terminal. visitedIds prevents cycles.
+  function trySolveChain(startPartId, inHoleIdx, A, visitedIds) {
+    const chain = []; // [{ part, inHoleIdx, outHoleIdx }]
+    let curId = startPartId;
+    let curInHole = inHoleIdx;
+    const visited = new Set(visitedIds);
+    visited.add(curId);
+
+    for (let depth = 0; depth < 8; depth++) {
+      const cur = parts.find(p => p.id === curId);
+      if (!cur) break;
+
+      if (groundByPart.has(curId)) {
+        if (fullyFixed.has(curId)) break; // over-constrained, abort — PBD handles it
+        chain.push({ part: cur, inHoleIdx: curInHole, outHoleIdx: groundByPart.get(curId).holeIdx });
+        break;
+      }
+
+      // Find first valid outgoing pivot joint from this part (not the incoming hole)
+      let moved = false;
+      for (const { joint: pj, entry: pe } of (pjByPart.get(curId) || [])) {
+        if (pe.holeIdx === curInHole) continue;
+        const cm2 = constraintMap.get(pj.id);
+        if (!cm2) continue;
+        const next = cm2.find(e => e.partId !== curId);
+        if (!next || visited.has(next.partId)) continue;
+        chain.push({ part: cur, inHoleIdx: curInHole, outHoleIdx: pe.holeIdx });
+        visited.add(next.partId);
+        curId = next.partId;
+        curInHole = next.holeIdx;
+        moved = true;
+        break;
+      }
+      if (!moved) break;
+    }
+
+    const n = chain.length;
+    if (n === 0 || !groundByPart.has(chain[n - 1].part.id)) return false;
+
+    const gEntry = groundByPart.get(chain[n - 1].part.id);
+    const G = { x: gEntry.x, y: gEntry.y };
+    const L = chain.map(cp => localLen(cp.part, cp.inHoleIdx, cp.outHoleIdx));
+    // K[i] = free pivot between link i and link i+1 (i = 0..n-2)
+    const K = chain.slice(0, n - 1).map(cp => simWorldHole(cp.part, cp.outHoleIdx));
+
+    if (n === 1) {
+      // Driving point A directly orients a grounded terminal — one-shot
+      const idx = parts.findIndex(p => p.id === chain[0].part.id);
+      if (idx < 0) return false;
+      parts[idx] = solveGroundedPart(chain[0].part, chain[0].outHoleIdx, G.x, G.y, chain[0].inHoleIdx, A.x, A.y);
+      solvedIds.add(chain[0].part.id);
+      return true;
+    }
+
+    if (n === 2) {
+      // Direct cci — one-shot, no iteration needed
+      const sols = circleCircleIntersect(A.x, A.y, L[0], G.x, G.y, L[1]);
+      if (!sols) return false;
+      K[0] = closest(sols, K[0]);
+    } else {
+      // Gauss-Seidel for n ≥ 3 links
+      let ok = true;
+      for (let it = 0; it < 24; it++) {
+        for (let i = 0; i < n - 1; i++) {
+          const prev = i === 0 ? A : K[i - 1];
+          const next = i === n - 2 ? G : K[i + 1];
+          const sols = circleCircleIntersect(prev.x, prev.y, L[i], next.x, next.y, L[i + 1]);
+          if (!sols) { ok = false; break; }
+          K[i] = closest(sols, K[i]);
+        }
+        if (!ok) break;
+      }
+      if (!ok) return false;
+    }
+
+    // Apply solved pivot positions to all parts
+    const pivots = [A, ...K, G]; // n+1 boundary points
+    for (let i = 0; i < n; i++) {
+      const cp = chain[i];
+      const idx = parts.findIndex(p => p.id === cp.part.id);
+      if (idx < 0) continue;
+      const pIn = pivots[i], pOut = pivots[i + 1];
+      parts[idx] = i < n - 1
+        ? solveGroundedPart(cp.part, cp.inHoleIdx, pIn.x, pIn.y, cp.outHoleIdx, pOut.x, pOut.y)
+        : solveGroundedPart(cp.part, cp.outHoleIdx, G.x, G.y, cp.inHoleIdx, pIn.x, pIn.y);
+      solvedIds.add(cp.part.id);
+    }
+    return true;
+  }
+
+  // Phase 1: solve chains driven directly by motors
+  for (const motorPart of parts) {
+    if (motorPart.type !== "motor") continue;
+    for (const { entry: me, joint: mj } of (pjByPart.get(motorPart.id) || [])) {
+      const cm0 = constraintMap.get(mj.id);
+      if (!cm0 || cm0.length < 2) continue;
+      const crankE = cm0.find(e => e.partId !== motorPart.id);
+      if (!crankE) continue;
+      const A = simWorldHole(motorPart, me.holeIdx);
+      trySolveChain(crankE.partId, crankE.holeIdx, A, [motorPart.id]);
+    }
+  }
+
+  // Phase 2: cascade — solved grounded parts drive further downstream chains
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const partId of [...solvedIds]) {
+      if (!groundByPart.has(partId) || fullyFixed.has(partId)) continue;
+      const solved = parts.find(p => p.id === partId);
+      if (!solved) continue;
+      const gHole = groundByPart.get(partId).holeIdx;
+      for (const { joint: pj, entry: pe } of (pjByPart.get(partId) || [])) {
+        if (pe.holeIdx === gHole) continue; // ignore the ground-pin hole
+        const cm2 = constraintMap.get(pj.id);
+        if (!cm2) continue;
+        const next = cm2.find(e => e.partId !== partId);
+        if (!next || solvedIds.has(next.partId)) continue;
+        const A = simWorldHole(solved, pe.holeIdx);
+        const before = solvedIds.size;
+        trySolveChain(next.partId, next.holeIdx, A, [partId]);
+        if (solvedIds.size > before) changed = true;
+      }
+    }
+  }
+
+  return solvedIds;
 }
 
 // Exact one-shot solver for a part that has a ground pin AND a pivot constraint.
@@ -723,16 +934,35 @@ function solveGroundedPart(part, groundHoleIdx, groundX, groundY, pivotHoleIdx, 
 function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
   const parts = simParts.map(p => ({ ...p }));
 
-  // Pre-build ground lookup: partId → {holeIdx, x, y}
+  // Pre-build ground lookup: partId → last {holeIdx, x, y} (for kinematic solver)
+  // Also build groundsByPart: partId → ALL [{holeIdx, x, y}] (for fully-fixed snapping)
   const groundByPart = new Map();
+  const groundsByPart = new Map();
   for (const joint of joints) {
     if (joint.kind !== "ground") continue;
     const cm = constraintMap.get(joint.id);
     if (!cm) continue;
     for (const entry of cm) {
       groundByPart.set(entry.partId, { holeIdx: entry.holeIdx, x: joint.x, y: joint.y });
+      if (!groundsByPart.has(entry.partId)) groundsByPart.set(entry.partId, []);
+      groundsByPart.get(entry.partId).push({ holeIdx: entry.holeIdx, x: joint.x, y: joint.y });
     }
   }
+
+  // Parts with 2+ ground joints are fully fixed — solve both position AND rotation
+  const fullyFixed2 = new Set(
+    [...groundsByPart.entries()].filter(([, gs]) => gs.length > 1).map(([id]) => id)
+  );
+  const snapFullyFixed = () => {
+    for (const partId of fullyFixed2) {
+      const gs = groundsByPart.get(partId);
+      if (!gs || gs.length < 2) continue;
+      const idx = parts.findIndex(p => p.id === partId);
+      if (idx < 0) continue;
+      parts[idx] = solveGroundedPart(parts[idx], gs[0].holeIdx, gs[0].x, gs[0].y, gs[1].holeIdx, gs[1].x, gs[1].y);
+    }
+  };
+  snapFullyFixed();
 
   // Sort joints so motor-connected pivots run first each iteration,
   // ensuring downstream constraints always see fresh motor-driven positions.
@@ -766,7 +996,7 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
   }
 
   // Step 1b: Exact kinematic solve for motor→free→grounded chains — no drift, no iteration
-  solveKinematicChains(parts, joints, constraintMap, groundByPart);
+  const kinematicallySolvedIds = solveKinematicChains(parts, joints, constraintMap, groundByPart);
 
   // Parts directly connected to a motor (the cranks): treated as authoritative in PBD
   const motorConnectedIds = new Set();
@@ -781,6 +1011,8 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
       }
     }
   }
+  // Parts solved analytically are also authoritative — PBD must not override them
+  for (const id of kinematicallySolvedIds) motorConnectedIds.add(id);
 
   // Step 2: Constraint iterations
   for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
@@ -789,8 +1021,8 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
       if (!cm || cm.length === 0) continue;
 
       if (joint.kind === "ground") {
-        // Translation-only re-pin: rotation is set by pivot constraints, not by the ground.
         const entry = cm[0];
+        if (fullyFixed2.has(entry.partId)) continue; // handled by snapFullyFixed
         const idx = parts.findIndex(p => p.id === entry.partId);
         if (idx < 0 || parts[idx].type === "motor") continue;
         const p = parts[idx];
@@ -822,15 +1054,36 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
           const s = relX * cosθ + relY * sinθ;
           const e = -relX * sinθ + relY * cosθ;
           const projX = S.x + s * cosθ, projY = S.y + s * sinθ;
-          const sFixed = S.type === "motor" || groundByPart.has(slotEntry.partId);
+          const sFixed = S.type === "motor" || fullyFixed2.has(slotEntry.partId);
           if (!sFixed) {
-            parts[slotIdx] = { ...S, x: S.x - e * sinθ, y: S.y + e * cosθ };
+            if (groundByPart.has(slotEntry.partId)) {
+              // Single-ground slotted strip: rotate around the ground anchor to align slot with pin
+              const gS = groundByPart.get(slotEntry.partId);
+              const gLH = getLocalHoles(S)[gS.holeIdx];
+              const dLen = Math.hypot(whOther.x - gS.x, whOther.y - gS.y);
+              if (gLH && dLen > 0.01) {
+                // s is along-axis position from hole 0; gLH.x is ground hole's local x
+                const newRotRad = Math.atan2(whOther.y - gS.y, whOther.x - gS.x) + (s < gLH.x ? Math.PI : 0);
+                const newRotDeg = newRotRad * 180 / Math.PI;
+                const rG = rotate(gLH, newRotDeg);
+                parts[slotIdx] = { ...S, rotation: newRotDeg, x: gS.x - rG.x, y: gS.y - rG.y };
+              }
+            } else {
+              parts[slotIdx] = { ...S, x: S.x - e * sinθ, y: S.y + e * cosθ };
+            }
           }
+          // Recompute projection with possibly-updated slot strip
+          const S2 = parts[slotIdx];
+          const θr2 = S2.rotation * Math.PI / 180;
+          const cosθ2 = Math.cos(θr2), sinθ2 = Math.sin(θr2);
+          const relX2 = whOther.x - S2.x, relY2 = whOther.y - S2.y;
+          const s2 = relX2 * cosθ2 + relY2 * sinθ2;
+          const projX2 = S2.x + s2 * cosθ2, projY2 = S2.y + s2 * sinθ2;
           if (parts[otherIdx].type !== "motor") {
             const gOther = groundByPart.get(otherEntry.partId);
             parts[otherIdx] = gOther
-              ? solveGroundedPart(parts[otherIdx], gOther.holeIdx, gOther.x, gOther.y, otherEntry.holeIdx, projX, projY)
-              : applyPositionConstraint(parts[otherIdx], otherEntry.holeIdx, projX, projY);
+              ? solveGroundedPart(parts[otherIdx], gOther.holeIdx, gOther.x, gOther.y, otherEntry.holeIdx, projX2, projY2)
+              : applyPositionConstraint(parts[otherIdx], otherEntry.holeIdx, projX2, projY2);
           }
         } else {
           const whA = simWorldHole(parts[idxA], entA.holeIdx);
@@ -841,27 +1094,33 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
           const gB = groundByPart.get(entB.partId);
 
           if (aFixed) {
-            // Motor drives A: pull B toward A's hole
-            parts[idxB] = gB
-              ? solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, whA.x, whA.y)
-              : applyPositionConstraint(parts[idxB], entB.holeIdx, whA.x, whA.y);
+            // Motor drives A: pull B toward A's hole — skip if B was analytically solved this frame
+            if (!motorConnectedIds.has(entB.partId)) {
+              parts[idxB] = gB
+                ? solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, whA.x, whA.y)
+                : applyPositionConstraint(parts[idxB], entB.holeIdx, whA.x, whA.y);
+            }
           } else if (bFixed) {
-            // Motor drives B: pull A toward B's hole
-            parts[idxA] = gA
-              ? solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y)
-              : applyPositionConstraint(parts[idxA], entA.holeIdx, whB.x, whB.y);
+            // Motor drives B: pull A toward B's hole — skip if A was analytically solved this frame
+            if (!motorConnectedIds.has(entA.partId)) {
+              parts[idxA] = gA
+                ? solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y)
+                : applyPositionConstraint(parts[idxA], entA.holeIdx, whB.x, whB.y);
+            }
           } else if (bGrounded && !aGrounded) {
-            // B grounded: solve B toward A's hole.
-            // Only pull A back if it's not motor-connected (motor-connected parts are authoritative).
-            parts[idxB] = solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, whA.x, whA.y);
+            // If B was analytically solved, don't re-rotate it — just pull A toward B's current hole.
+            if (!motorConnectedIds.has(entB.partId)) {
+              parts[idxB] = solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, whA.x, whA.y);
+            }
             if (!motorConnectedIds.has(entA.partId)) {
               const newWhB = simWorldHole(parts[idxB], entB.holeIdx);
               parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, newWhB.x, newWhB.y);
             }
           } else if (aGrounded && !bGrounded) {
-            // A grounded: solve A toward B's hole.
-            // Only pull B back if it's not motor-connected.
-            parts[idxA] = solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y);
+            // If A was analytically solved, don't re-rotate it — just pull B toward A's current hole.
+            if (!motorConnectedIds.has(entA.partId)) {
+              parts[idxA] = solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y);
+            }
             if (!motorConnectedIds.has(entB.partId)) {
               const newWhA = simWorldHole(parts[idxA], entA.holeIdx);
               parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, newWhA.x, newWhA.y);
@@ -911,17 +1170,19 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
     }
   }
 
-  // Jam detection: check all motor-connected pivot joints for large residual error.
-  // If any joint's hole pair is more than 0.5 grid units apart, the mechanism has
-  // jammed (geometrically impossible configuration). Roll back the motor rotation.
+  // Re-snap fully-fixed parts after PBD — prevents any accumulated drift
+  snapFullyFixed();
+
+  // Jam detection: check all pivot joints where either part is motor-connected.
+  // This catches disconnections anywhere in the driven chain, not just at the motor joint.
   let jammed = false;
   for (const joint of joints) {
     if (joint.kind === "ground") continue;
     const cm = constraintMap.get(joint.id);
     if (!cm || cm.length < 2) continue;
-    const hasMotor = cm.some(e => parts.find(p => p.id === e.partId)?.type === "motor");
-    if (!hasMotor) continue;
     const [entA, entB] = cm;
+    const eitherMC = motorConnectedIds.has(entA.partId) || motorConnectedIds.has(entB.partId);
+    if (!eitherMC) continue;
     const whA = simWorldHole(parts.find(p => p.id === entA.partId) ?? simParts.find(p => p.id === entA.partId), entA.holeIdx);
     const whB = simWorldHole(parts.find(p => p.id === entB.partId) ?? simParts.find(p => p.id === entB.partId), entB.holeIdx);
     if (whA && whB && Math.hypot(whA.x - whB.x, whA.y - whB.y) > 0.5) {
@@ -931,17 +1192,24 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
   }
 
   if (jammed) {
-    // Roll back to previous frame — freeze the mechanism in place
-    return simParts.map(p => ({ ...p }));
+    return { parts: simParts.map(p => ({ ...p })), jammed: true };
   }
-
-  return parts;
+  return { parts, jammed: false };
 }
 
 // ---------- Main component ----------
 export default function ZineMachine() {
   const [st, dispatch] = useReducer(reducer, initial);
   const svgRef = useRef(null);
+  const [camera, setCamera] = useState({ x: SECTION_COLS * GRID, y: SECTION_ROWS * GRID });
+  const cameraRef = useRef(camera);
+  useEffect(() => { cameraRef.current = camera; }, [camera]);
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const spaceHeldRef = useRef(false);
+  const [elastic, setElastic] = useState(null); // { origin:{x,y}, current:{x,y} } for two-click strip placement
   const [hoverHole, setHoverHole] = useState(null); // {x, y} in grid coords
   const [drag, setDrag] = useState(null);
   // drag: { kind: 'move' | 'rotate', id, startX, startY, origPart }
@@ -956,12 +1224,27 @@ export default function ZineMachine() {
   // Simulation state
   const [simParts, setSimParts] = useState(null);
   const [simPaused, setSimPaused] = useState(false);
-  const simRef = useRef(null);   // { constraintMap, weldTransforms, joints, cur }
+  const [simJammed, setSimJammed] = useState(false);
+  const [selRect, setSelRect] = useState(null);       // { x1,y1,x2,y2 } grid coords
+  const [multiSelectedIds, setMultiSelectedIds] = useState(new Set());
+  const multiSelectedIdsRef = useRef(new Set());
+  useEffect(() => { multiSelectedIdsRef.current = multiSelectedIds; }, [multiSelectedIds]);
+  const [hoverRotHandle, setHoverRotHandle] = useState(false);
+  const simRef = useRef(null);
   const rafRef = useRef(null);
   const lastTimeRef = useRef(null);
   const pausedRef = useRef(false);
+  const triggeredBellsRef = useRef(new Set());
 
   useEffect(() => { pausedRef.current = simPaused; }, [simPaused]);
+  useEffect(() => { setHoverRotHandle(false); }, [st.selectedId]);
+
+  // Auto-save to localStorage on every design change
+  useEffect(() => {
+    try {
+      localStorage.setItem("zine_machine_v4", JSON.stringify({ parts: st.parts, joints: st.joints, nextId: st.nextId }));
+    } catch(e) {}
+  }, [st.parts, st.joints, st.nextId]);
 
   useEffect(() => {
     if (st.mode !== "play") {
@@ -969,6 +1252,8 @@ export default function ZineMachine() {
       lastTimeRef.current = null;
       setSimParts(null);
       setSimPaused(false);
+      setSimJammed(false);
+      triggeredBellsRef.current.clear();
       return;
     }
     const initParts = st.parts.map(p => ({ ...p }));
@@ -988,7 +1273,28 @@ export default function ZineMachine() {
         if (!lastTimeRef.current) lastTimeRef.current = time;
         const dt = Math.min((time - lastTimeRef.current) / 1000, 0.05);
         lastTimeRef.current = time;
-        cur = stepSimulation(cur, initJoints, cm, wt, dt);
+        const { parts: nextParts, jammed } = stepSimulation(cur, initJoints, cm, wt, dt);
+        cur = nextParts;
+        setSimJammed(jammed);
+        // Bell collision detection
+        const bellParts = initParts.filter(p => p.type === "bell");
+        for (const bell of bellParts) {
+          let anyHit = false;
+          for (const p of cur) {
+            if (p.type === "bell") continue;
+            const checkPoints = [{ x: p.x, y: p.y }, ...worldHoles(p)];
+            for (const pt of checkPoints) {
+              if (Math.hypot(pt.x - bell.x, pt.y - bell.y) < 0.65) { anyHit = true; break; }
+            }
+            if (anyHit) break;
+          }
+          if (anyHit && !triggeredBellsRef.current.has(bell.id)) {
+            playNote(NOTES[bell.note ?? 'A4']);
+            triggeredBellsRef.current.add(bell.id);
+          } else if (!anyHit) {
+            triggeredBellsRef.current.delete(bell.id);
+          }
+        }
         setSimParts([...cur]);
         rafRef.current = requestAnimationFrame(loop);
       } catch (err) {
@@ -1004,19 +1310,33 @@ export default function ZineMachine() {
 
   const boardW = (COLS - 1 + BOARD_PAD * 2) * GRID;
   const boardH = (ROWS - 1 + BOARD_PAD * 2) * GRID;
-  const boardX = -BOARD_PAD * GRID;
-  const boardY = -BOARD_PAD * GRID;
+
+  const handleZoom = useCallback((delta) => {
+    const svg = svgRef.current;
+    const newZoom = Math.max(0.5, Math.min(1.5, zoomRef.current + delta));
+    if (newZoom === zoomRef.current) return;
+    if (svg) {
+      const rect = svg.getBoundingClientRect();
+      const cx = rect.width / 2, cy = rect.height / 2;
+      const ratio = newZoom / zoomRef.current;
+      setCamera(prev => ({
+        x: prev.x * ratio + cx * (ratio - 1),
+        y: prev.y * ratio + cy * (ratio - 1),
+      }));
+    }
+    setZoom(newZoom);
+  }, []);
 
   // ---- Pointer utilities ----
   const pointerToGrid = useCallback((e) => {
     const svg = svgRef.current;
     if (!svg) return null;
-    const pt = svg.createSVGPoint();
-    pt.x = e.clientX; pt.y = e.clientY;
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return null;
-    const loc = pt.matrixTransform(ctm.inverse());
-    return { x: loc.x / GRID, y: loc.y / GRID };
+    const rect = svg.getBoundingClientRect();
+    const z = zoomRef.current;
+    return {
+      x: (e.clientX - rect.left + cameraRef.current.x) / (GRID * z),
+      y: (e.clientY - rect.top  + cameraRef.current.y) / (GRID * z),
+    };
   }, []);
 
   const snapToBoard = (gx, gy) => ({
@@ -1026,8 +1346,30 @@ export default function ZineMachine() {
 
   // ---- Board move handler: hover + drag update ----
   const handleSvgMove = (e) => {
+    // Pan mode: update camera directly, no grid coords needed
+    if (drag?.kind === "pan") {
+      setCamera({
+        x: drag.startCamera.x - (e.clientX - drag.startX),
+        y: drag.startCamera.y - (e.clientY - drag.startY),
+      });
+      return;
+    }
+    // Spacebar pan
+    if (spaceHeldRef.current && drag?.kind === "space-pan") {
+      setCamera({
+        x: drag.startCamera.x - (e.clientX - drag.startX),
+        y: drag.startCamera.y - (e.clientY - drag.startY),
+      });
+      return;
+    }
+
     const g = pointerToGrid(e);
     if (!g) return;
+
+    // Update elastic strip ghost destination
+    if (elastic) {
+      setElastic(prev => prev ? { ...prev, current: { x: g.x, y: g.y } } : null);
+    }
 
     // When placing, snap hover to nearby part holes too
     let holePos = snapToBoard(g.x, g.y);
@@ -1038,32 +1380,43 @@ export default function ZineMachine() {
           const d = Math.hypot(g.x - th.x, g.y - th.y);
           if (d < bestDist) { bestDist = d; holePos = { x: th.x, y: th.y }; }
         }
+        if (other.type === "slottedStrip") {
+          const θr = other.rotation * Math.PI / 180;
+          const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
+          const relX = g.x - other.x, relY = g.y - other.y;
+          const along = relX * cosθ + relY * sinθ;
+          const perp = Math.abs(-relX * sinθ + relY * cosθ);
+          if (along >= 0.4 && along <= other.size - 1.4 && perp < 0.5) {
+            const sx = other.x + along * cosθ, sy = other.y + along * sinθ;
+            const d = Math.hypot(g.x - sx, g.y - sy);
+            if (d < bestDist) { bestDist = d; holePos = { x: sx, y: sy }; }
+          }
+        }
       }
     }
     setHoverHole(holePos);
 
-    // Snap to nearest part hole (or slot axis) when a joint tool is active
-    if (["pivot", "weld", "ground"].includes(st.tool)) {
+    // Joint tool snapping: pivot/weld → part holes only (exact slot projection, no grid);
+    // ground → grid only. Also applies when dragging an existing pivot/weld joint.
+    const draggedJointKind = jointDrag ? st.joints.find(j => j.id === jointDrag.id)?.kind : null;
+    const needsHoleSnap = st.tool === "pivot" || st.tool === "weld" ||
+      (jointDrag && draggedJointKind !== "ground");
+    if (needsHoleSnap) {
       let bestDist = 0.9, nearest = null;
       for (const part of st.parts) {
         for (const th of worldHoles(part)) {
           const d = Math.hypot(g.x - th.x, g.y - th.y);
           if (d < bestDist) { bestDist = d; nearest = { x: th.x, y: th.y }; }
         }
-        // For slotted strips, also snap to any point along the slot axis
         if (part.type === "slottedStrip") {
           const θr = part.rotation * Math.PI / 180;
           const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
           const relX = g.x - part.x, relY = g.y - part.y;
           const along = relX * cosθ + relY * sinθ;
           const perp = Math.abs(-relX * sinθ + relY * cosθ);
-          // Within slot extent and close enough to the axis
-          if (along >= 0 && along <= part.size - 1 && perp < 0.7) {
-            // Snap along-axis to nearest 0.5 grid unit for precision
-            const snappedAlong = Math.round(along * 2) / 2;
-            const clamped = Math.max(0.5, Math.min(part.size - 1.5, snappedAlong));
-            const sx = part.x + clamped * cosθ;
-            const sy = part.y + clamped * sinθ;
+          if (along >= 0.5 && along <= part.size - 1.5 && perp < 0.7) {
+            const sx = part.x + along * cosθ;
+            const sy = part.y + along * sinθ;
             const d = Math.hypot(g.x - sx, g.y - sy);
             if (d < bestDist) { bestDist = d; nearest = { x: sx, y: sy }; }
           }
@@ -1091,14 +1444,32 @@ export default function ZineMachine() {
       setHoverPivotHole(null);
     }
 
+    if (selRect) {
+      setSelRect(r => ({ ...r, x2: g.x, y2: g.y }));
+      return;
+    }
+
     // Joint drag
     if (jointDrag) {
-      const newPos = jointSnap ?? snapToBoard(g.x, g.y);
+      const draggedJoint = st.joints.find(j => j.id === jointDrag.id);
+      const newPos = draggedJoint?.kind === "ground"
+        ? snapToBoard(g.x, g.y)
+        : (jointSnap ?? { x: g.x, y: g.y }); // pivot/weld: free cursor, snaps only to part holes
       dispatch({ type: "MOVE_JOINT_LIVE", id: jointDrag.id, x: newPos.x, y: newPos.y });
       return;
     }
 
     if (!drag) return;
+
+    if (drag.kind === "multi-move") {
+      const updates = {};
+      for (const id of drag.ids) {
+        const off = drag.offsets[id];
+        if (off) updates[id] = { x: g.x + off.dx, y: g.y + off.dy };
+      }
+      dispatch({ type: "BATCH_UPDATE_PARTS_LIVE", updates });
+      return;
+    }
 
     if (drag.kind === "move") {
       const offX = drag.origPart.x - drag.startX;
@@ -1131,7 +1502,8 @@ export default function ZineMachine() {
       }
       setSnapHint(newSnapHint);
 
-      const pos = snappedToPartHole ?? snapToBoard(rawX, rawY);
+      const isFreePos = draggedPart?.type === "bell" || draggedPart?.type === "stamp";
+      const pos = snappedToPartHole ?? (isFreePos ? { x: rawX, y: rawY } : snapToBoard(rawX, rawY));
       dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { x: pos.x, y: pos.y } });
     } else if (drag.kind === "rotate") {
       const p = st.parts.find(pp => pp.id === drag.id);
@@ -1139,7 +1511,7 @@ export default function ZineMachine() {
       const snap = (deg) => e.shiftKey ? deg : Math.round(deg / ANGLE_SNAP) * ANGLE_SNAP;
       if (drag.pivot?.localHole) {
         const { x: jx, y: jy, localHole } = drag.pivot;
-        const rawDeg = Math.atan2(g.y - jy, g.x - jx) * 180 / Math.PI;
+        const rawDeg = Math.atan2(g.y - jy, g.x - jx) * 180 / Math.PI - (drag.handleAngle ?? 0) * 180 / Math.PI;
         const snappedDeg = snap(rawDeg);
         const r = rotate(localHole, snappedDeg);
         dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { rotation: snappedDeg, x: jx - r.x, y: jy - r.y } });
@@ -1153,7 +1525,10 @@ export default function ZineMachine() {
   const handleSvgUp = (e) => {
     if (jointDrag) {
       const g = e ? pointerToGrid(e) : null;
-      const pos = jointSnap ?? (g ? snapToBoard(g.x, g.y) : { x: jointDrag.origX, y: jointDrag.origY });
+      const draggedJoint = st.joints.find(j => j.id === jointDrag.id);
+      const pos = draggedJoint?.kind === "ground"
+        ? (g ? snapToBoard(g.x, g.y) : { x: jointDrag.origX, y: jointDrag.origY })
+        : (jointSnap ?? { x: jointDrag.origX, y: jointDrag.origY }); // pivot/weld: revert to origin if not on a part hole
       const partsHere = st.parts.filter(p => {
         if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.6)) return true;
         if (p.type === "slottedStrip") {
@@ -1170,6 +1545,20 @@ export default function ZineMachine() {
       setJointDrag(null);
       return;
     }
+    if (selRect) {
+      const minX = Math.min(selRect.x1, selRect.x2), maxX = Math.max(selRect.x1, selRect.x2);
+      const minY = Math.min(selRect.y1, selRect.y2), maxY = Math.max(selRect.y1, selRect.y2);
+      if (Math.abs(maxX - minX) > 0.3 || Math.abs(maxY - minY) > 0.3) {
+        const ids = new Set(st.parts.filter(p =>
+          worldHoles(p).some(h => h.x >= minX && h.x <= maxX && h.y >= minY && h.y <= maxY)
+        ).map(p => p.id));
+        setMultiSelectedIds(ids);
+        if (ids.size === 1) dispatch({ type: "SELECT", id: [...ids][0] });
+      }
+      setSelRect(null);
+      return;
+    }
+    if (drag?.kind === "space-pan") { setDrag(null); return; }
     setDrag(null);
     setSnapHint(null);
   };
@@ -1177,20 +1566,61 @@ export default function ZineMachine() {
   // ---- Click on board (place new part if palette active) ----
   const handleSvgDown = (e) => {
     if (st.mode !== "build") return;
+
+    // Spacebar or hand tool: start panning
+    if (spaceHeldRef.current) {
+      setDrag({ kind: "space-pan", startX: e.clientX, startY: e.clientY, startCamera: { ...cameraRef.current } });
+      return;
+    }
+    if (st.tool === "hand") {
+      setDrag({ kind: "pan", startX: e.clientX, startY: e.clientY, startCamera: { ...cameraRef.current } });
+      return;
+    }
+
     if (st.tool === "place" && st.palette) {
       const g = pointerToGrid(e); if (!g) return;
-      const pos = hoverHole ?? snapToBoard(g.x, g.y);
       const def = PALETTE.find(p => p.id === st.palette);
       if (!def) return;
+
+      // Elastic two-click placement for strip and slottedStrip
+      if (def.type === "strip" || def.type === "slottedStrip") {
+        const origin = hoverHole ?? snapToBoard(g.x, g.y);
+        if (!elastic) {
+          setElastic({ origin, current: origin });
+          return;
+        }
+        // Second click: commit
+        const dx = elastic.current.x - elastic.origin.x;
+        const dy = elastic.current.y - elastic.origin.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 0.5) { setElastic(null); return; }
+        const size = Math.max(2, Math.min(15, Math.round(dist) + 1));
+        const rotation = Math.round(Math.atan2(dy, dx) * 180 / Math.PI / ANGLE_SNAP) * ANGLE_SNAP;
+        dispatch({ type: "ADD_PART", part: { type: def.type, size, x: elastic.origin.x, y: elastic.origin.y, rotation } });
+        setElastic(null);
+        return;
+      }
+
+      const freePlace = def.type === "bell" || def.type === "stamp";
+      let pos = freePlace ? { x: g.x, y: g.y } : (hoverHole ?? snapToBoard(g.x, g.y));
+
+      // Centroid alignment for shapes: offset so centroid lands on the snapped grid point
+      if (def.type === "triangle" || def.type === "square" || def.type === "pentagon") {
+        const lh = getLocalHoles({ type: def.type });
+        const c = lh[lh.length - 1]; // last hole = centroid
+        pos = { x: pos.x - c.x, y: pos.y - c.y };
+      }
+
       dispatch({
         type: "ADD_PART",
-        part: { type: def.type, size: def.size, x: pos.x, y: pos.y, rotation: 0 },
+        part: { type: def.type, size: def.size, x: pos.x, y: pos.y, rotation: 0, ...(def.glyph ? { glyph: def.glyph } : {}) },
       });
       return;
     }
     if (["pivot", "weld", "ground"].includes(st.tool)) {
       const g = pointerToGrid(e); if (!g) return;
-      const pos = jointSnap ?? snapToBoard(g.x, g.y);
+      const pos = st.tool === "ground" ? snapToBoard(g.x, g.y) : jointSnap;
+      if (!pos) return; // pivot/weld must land on a part hole
       const partsHere = st.parts.filter(p => {
         if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.6)) return true;
         // For slotted strips, also match if pos is along the slot axis
@@ -1236,10 +1666,15 @@ export default function ZineMachine() {
       }
     }
 
-    // Click on empty board deselects
+    // Click/drag on empty board: deselect or start rect selection
     if (e.target === svgRef.current || e.target.dataset?.bg === "1") {
       dispatch({ type: "SELECT", id: null });
       setSelectedJointId(null);
+      setMultiSelectedIds(new Set());
+      if (st.tool === "select") {
+        const g2 = pointerToGrid(e);
+        if (g2) setSelRect({ x1: g2.x, y1: g2.y, x2: g2.x, y2: g2.y });
+      }
     }
   };
 
@@ -1254,8 +1689,31 @@ export default function ZineMachine() {
     }
     if (st.tool === "select") {
       setSelectedJointId(null);
-      dispatch({ type: "SELECT", id: part.id });
       const g = pointerToGrid(e);
+      if (e.altKey) {
+        // Alt+drag: duplicate and drag the copy
+        const newId = "p" + st.nextId;
+        dispatch({ type: "DUPLICATE_PART", id: part.id });
+        setDrag({
+          kind: "move", id: newId,
+          startX: g?.x ?? 0, startY: g?.y ?? 0,
+          origPart: { ...part, id: newId, x: part.x + 1, y: part.y + 1 },
+        });
+        return;
+      }
+      // If part is in multi-selection, drag all together
+      if (multiSelectedIds.has(part.id) && multiSelectedIds.size > 1) {
+        dispatch({ type: "SNAPSHOT" });
+        const offsets = {};
+        for (const id of multiSelectedIds) {
+          const pp = st.parts.find(q => q.id === id);
+          if (pp) offsets[id] = { dx: pp.x - (g?.x ?? 0), dy: pp.y - (g?.y ?? 0) };
+        }
+        setDrag({ kind: "multi-move", ids: [...multiSelectedIds], offsets });
+        return;
+      }
+      dispatch({ type: "SELECT", id: part.id });
+      setMultiSelectedIds(new Set());
       dispatch({ type: "SNAPSHOT" });
       setDrag({
         kind: "move",
@@ -1285,7 +1743,12 @@ export default function ZineMachine() {
       }
     }
 
-    setDrag({ kind: "rotate", id: part.id, origPart: { ...part }, pivot });
+    // Angle of handle relative to pivot in local space — needed to correct atan2 when handle is at -x
+    const handleLocal = rotationHandleLocal(part);
+    const pivotLocal = localHoles[pivotIdx] ?? { x: 0, y: 0 };
+    const handleAngle = Math.atan2(handleLocal.y - pivotLocal.y, handleLocal.x - pivotLocal.x);
+
+    setDrag({ kind: "rotate", id: part.id, origPart: { ...part }, pivot, handleAngle });
   };
 
 
@@ -1307,7 +1770,14 @@ export default function ZineMachine() {
 
   // ---- Keyboard ----
   useEffect(() => {
-    const onKey = (e) => {
+    const onKeyDown = (e) => {
+      // Spacebar pan
+      if (e.code === "Space" && !e.target.closest?.("input, textarea")) {
+        e.preventDefault();
+        spaceHeldRef.current = true;
+        setSpaceHeld(true);
+        return;
+      }
       const metaOrCtrl = e.metaKey || e.ctrlKey;
       if (metaOrCtrl && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -1318,7 +1788,19 @@ export default function ZineMachine() {
       if (metaOrCtrl && e.key.toLowerCase() === "y") {
         e.preventDefault(); dispatch({ type: "REDO" }); return;
       }
+      if (e.key === "Escape") {
+        setElastic(null);
+        setCtxMenu(null);
+        dispatch({ type: "TOOL", tool: "select" });
+        return;
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (multiSelectedIdsRef.current.size > 0) {
+          e.preventDefault();
+          dispatch({ type: "DELETE_PARTS", ids: [...multiSelectedIdsRef.current] });
+          setMultiSelectedIds(new Set());
+          return;
+        }
         if (st.selectedId) {
           e.preventDefault();
           dispatch({ type: "DELETE_PART", id: st.selectedId });
@@ -1342,21 +1824,47 @@ export default function ZineMachine() {
       if (e.key.toLowerCase() === "m") {
         dispatch({ type: "TOOL", tool: "select" }); return;
       }
-      if (e.key === "Escape") {
-        setCtxMenu(null);
-        dispatch({ type: "TOOL", tool: "select" });
+    };
+    const onKeyUp = (e) => {
+      if (e.code === "Space") {
+        spaceHeldRef.current = false;
+        setSpaceHeld(false);
+        setDrag(d => d?.kind === "space-pan" ? null : d);
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, [st.selectedId, st.parts, selectedJointId]);
 
+  // Auto-show / reposition context menu whenever selection changes
   useEffect(() => {
-    if (!ctxMenu) return;
-    const close = () => setCtxMenu(null);
-    window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
-  }, [ctxMenu]);
+    if (st.mode !== "build") { setCtxMenu(null); return; }
+
+    let part = null;
+    let multiIds = null;
+    if (multiSelectedIds.size > 1) {
+      part = st.parts.find(p => multiSelectedIds.has(p.id));
+      multiIds = [...multiSelectedIds];
+    } else if (st.selectedId) {
+      part = st.parts.find(p => p.id === st.selectedId);
+    }
+
+    if (!part) { setCtxMenu(null); return; }
+
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const z = zoomRef.current;
+    const cam = cameraRef.current;
+    const sx = part.x * GRID * z - cam.x + rect.left;
+    const sy = part.y * GRID * z - cam.y + rect.top;
+
+    setCtxMenu({ x: sx, y: Math.max(100, sy - 60), part, multiIds });
+  }, [st.selectedId, multiSelectedIds, st.mode]); // eslint-disable-line
 
   useEffect(() => {
     if (!jointCtxMenu) return;
@@ -1387,11 +1895,37 @@ export default function ZineMachine() {
 
   // ---- Rendering ----
   const ghostPart = useMemo(() => {
-    if (st.tool !== "place" || !st.palette || !hoverHole) return null;
+    if (st.tool !== "place" || !st.palette) return null;
     const def = PALETTE.find(p => p.id === st.palette);
     if (!def) return null;
+
+    // Elastic strip: show live ghost from origin to cursor
+    if (elastic && (def.type === "strip" || def.type === "slottedStrip")) {
+      const dx = elastic.current.x - elastic.origin.x;
+      const dy = elastic.current.y - elastic.origin.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 0.5) return { type: def.type, size: 3, x: elastic.origin.x, y: elastic.origin.y, rotation: 0 };
+      const size = Math.max(2, Math.min(15, Math.round(dist) + 1));
+      const rotation = Math.round(Math.atan2(dy, dx) * 180 / Math.PI / ANGLE_SNAP) * ANGLE_SNAP;
+      return { type: def.type, size, x: elastic.origin.x, y: elastic.origin.y, rotation };
+    }
+
+    if (!hoverHole) return null;
+
+    // Pre-click strip ghost: show default-size 3 strip at cursor
+    if (def.type === "strip" || def.type === "slottedStrip") {
+      return { type: def.type, size: 3, x: hoverHole.x, y: hoverHole.y, rotation: 0 };
+    }
+
+    // Shapes: offset so centroid lands on hover point
+    if (def.type === "triangle" || def.type === "square" || def.type === "pentagon") {
+      const lh = getLocalHoles({ type: def.type });
+      const c = lh[lh.length - 1];
+      return { type: def.type, x: hoverHole.x - c.x, y: hoverHole.y - c.y, rotation: 0 };
+    }
+
     return { type: def.type, size: def.size, x: hoverHole.x, y: hoverHole.y, rotation: 0 };
-  }, [st.tool, st.palette, hoverHole]);
+  }, [st.tool, st.palette, hoverHole, elastic]);
 
   const selectedPart = st.parts.find(p => p.id === st.selectedId);
   const displayParts = simParts ?? st.parts;
@@ -1409,7 +1943,7 @@ export default function ZineMachine() {
       }}
     >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=Noto+Symbols+2&display=swap');
         .serif { font-family: 'DM Serif Display', ui-serif, Georgia, serif; }
         .mono { font-family: 'DM Mono', ui-monospace, monospace; }
         .tool-btn { transition: background 120ms ease, transform 120ms ease, border-color 120ms ease; }
@@ -1423,54 +1957,36 @@ export default function ZineMachine() {
 
       <TopBar st={st} dispatch={dispatch} simPaused={simPaused} setSimPaused={setSimPaused} />
 
-      <div className="flex-1 flex min-h-0">
-        <LeftSidebar st={st} dispatch={dispatch} />
-
-        <div
-          className="flex-1 min-w-0 relative flex items-center justify-center overflow-hidden noise"
-          style={{ background: COLORS.shellDeep }}
-        >
+      <div className="flex-1 relative min-h-0" style={{ background: COLORS.board, overflow: "hidden" }}>
           <svg
             ref={svgRef}
-            className="block"
-            width="100%" height="100%"
-            viewBox={`${boardX - 20} ${boardY - 20} ${boardW + 40} ${boardH + 40}`}
-            preserveAspectRatio="xMidYMid meet"
+            style={{
+              display: "block", width: "100%", height: "100%",
+              cursor:
+                spaceHeld ? (drag?.kind === "space-pan" ? "grabbing" : "grab") :
+                st.tool === "hand" ? (drag?.kind === "pan" ? "grabbing" : "grab") :
+                st.tool === "place" ? "crosshair" :
+                st.tool === "delete" ? "not-allowed" :
+                jointToolActive ? "crosshair" :
+                drag?.kind === "move" || drag?.kind === "multi-move" ? "move" :
+                drag?.kind === "rotate" ? "grabbing" : "default",
+            }}
             onPointerDown={handleSvgDown}
             onPointerMove={handleSvgMove}
             onPointerUp={(e) => handleSvgUp(e)}
             onPointerLeave={(e) => handleSvgUp(e)}
             onContextMenu={(e) => e.preventDefault()}
-            style={{
-              cursor:
-                st.tool === "place" ? "crosshair" :
-                st.tool === "delete" ? "not-allowed" :
-                jointToolActive ? "crosshair" :
-                drag?.kind === "move" ? "grabbing" :
-                drag?.kind === "rotate" ? "grabbing" : "default",
-            }}
           >
-            {/* Board */}
-            <rect
-              data-bg="1"
-              x={boardX} y={boardY}
-              width={boardW} height={boardH}
-              rx="8" ry="8"
-              fill={COLORS.board}
-            />
-            {/* Board holes */}
-            <g pointerEvents="none">
-              {Array.from({ length: ROWS }).map((_, j) =>
-                Array.from({ length: COLS }).map((_, i) => (
-                  <circle
-                    key={`${i}-${j}`}
-                    cx={i * GRID} cy={j * GRID}
-                    r={HOLE_R_BOARD}
-                    fill={COLORS.boardDot}
-                  />
-                ))
-              )}
-            </g>
+            <defs>
+              <pattern id="board-dots" x={-GRID / 2} y={-GRID / 2} width={GRID} height={GRID} patternUnits="userSpaceOnUse">
+                <circle cx={GRID / 2} cy={GRID / 2} r={HOLE_R_BOARD} fill={COLORS.boardDot} opacity="0.8" />
+              </pattern>
+            </defs>
+            {/* Camera transform: everything in world coords */}
+            <g transform={`translate(${-camera.x}, ${-camera.y}) scale(${zoom})`}>
+            {/* Board background + dots via pattern */}
+            <rect data-bg="1" x={-BOARD_PAD * GRID} y={-BOARD_PAD * GRID} width={boardW} height={boardH} rx="8" ry="8" fill={COLORS.board} />
+            <rect x="0" y="0" width={(COLS - 1) * GRID} height={(ROWS - 1) * GRID} fill="url(#board-dots)" pointerEvents="none" />
 
             {/* Hover hole indicator */}
             {hoverHole && st.mode === "build" && (
@@ -1508,13 +2024,14 @@ export default function ZineMachine() {
               }).map(p => (
                 <g
                   key={p.id}
-                  style={{ cursor: st.mode === "play" ? "default" : st.tool === "select" ? "grab" : (st.tool === "delete" ? "not-allowed" : "default") }}
+                  style={{ cursor: st.mode === "play" ? "default" : st.tool === "select" ? "move" : (st.tool === "delete" ? "not-allowed" : "default") }}
                   onPointerDown={(e) => handlePartDown(e, p)}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     if (st.mode !== "build") return;
                     e.stopPropagation();
-                    setCtxMenu({ x: e.clientX, y: e.clientY, part: p });
+                    const isMulti = multiSelectedIds.size > 1 && multiSelectedIds.has(p.id);
+                    setCtxMenu({ x: e.clientX, y: e.clientY, part: p, multiIds: isMulti ? [...multiSelectedIds] : null });
                   }}
                 >
                   <PartShape part={p} selected={p.id === st.selectedId && st.mode === "build"} />
@@ -1544,6 +2061,13 @@ export default function ZineMachine() {
               <RotationHandle
                 part={selectedPart}
                 onPointerDown={(e) => handleRotateHandleDown(e, selectedPart)}
+                hovered={hoverRotHandle}
+                onHoverChange={(v) => setHoverRotHandle(v)}
+                onSwitchPivot={() => {
+                  const pivotIdx = selectedPart.pivotHoleIdx ?? 0;
+                  const otherIdx = pivotIdx === 0 ? selectedPart.size - 1 : 0;
+                  dispatch({ type: "UPDATE_PART", id: selectedPart.id, updates: { pivotHoleIdx: otherIdx } });
+                }}
               />
             )}
 
@@ -1573,6 +2097,32 @@ export default function ZineMachine() {
                   );
                 })}
               </g>
+            )}
+
+            {/* Multi-select halos */}
+            {multiSelectedIds.size > 1 && [...multiSelectedIds].map(id => {
+              const p = st.parts.find(pp => pp.id === id);
+              if (!p) return null;
+              return (
+                <g key={id} transform={`translate(${p.x * GRID},${p.y * GRID}) rotate(${p.rotation})`} pointerEvents="none">
+                  <SelectionHalo part={p} />
+                </g>
+              );
+            })}
+
+            {/* Rectangle selection box */}
+            {selRect && (
+              <rect
+                x={Math.min(selRect.x1, selRect.x2) * GRID}
+                y={Math.min(selRect.y1, selRect.y2) * GRID}
+                width={Math.abs(selRect.x2 - selRect.x1) * GRID}
+                height={Math.abs(selRect.y2 - selRect.y1) * GRID}
+                fill="rgba(255,210,63,0.07)"
+                stroke={COLORS.select}
+                strokeWidth="1.4"
+                strokeDasharray="5 3"
+                pointerEvents="none"
+              />
             )}
 
             {/* Ghost preview for placement */}
@@ -1628,6 +2178,16 @@ export default function ZineMachine() {
                 );
               })}
             </g>
+
+            {/* Elastic placement origin dot */}
+            {elastic && (
+              <circle
+                cx={elastic.origin.x * GRID} cy={elastic.origin.y * GRID}
+                r={6} fill={COLORS.select} stroke={COLORS.partEdge} strokeWidth="1.5"
+                pointerEvents="none"
+              />
+            )}
+            </g>{/* end camera transform */}
           </svg>
 
           {/* Empty state hint */}
@@ -1646,22 +2206,48 @@ export default function ZineMachine() {
           )}
 
           {/* Bottom-left status */}
-          <StatusChip st={st} hoverHole={hoverHole} />
+          <StatusChip st={st} hoverHole={hoverHole} simJammed={simJammed} />
+
+          {/* Zoom controls — bottom-right */}
+          <div
+            className="absolute bottom-4 right-4 flex flex-col gap-1 pointer-events-auto z-20"
+          >
+            <button
+              className="w-8 h-8 rounded mono text-sm flex items-center justify-center tool-btn"
+              style={{ background: COLORS.sidebar, border: `1px solid ${COLORS.divider}`, color: COLORS.ink }}
+              onClick={() => handleZoom(0.15)}
+              title="Zoom in (+)"
+            >+</button>
+            <div className="mono text-[9px] text-center" style={{ color: COLORS.inkDim }}>{Math.round(zoom * 100)}%</div>
+            <button
+              className="w-8 h-8 rounded mono text-sm flex items-center justify-center tool-btn"
+              style={{ background: COLORS.sidebar, border: `1px solid ${COLORS.divider}`, color: COLORS.ink }}
+              onClick={() => handleZoom(-0.15)}
+              title="Zoom out (-)"
+            >−</button>
+          </div>
 
           {/* Right-click context menu */}
-          {ctxMenu && (
-            <ContextMenu
-              x={ctxMenu.x} y={ctxMenu.y} part={ctxMenu.part}
-              onClose={() => setCtxMenu(null)}
-              onAction={(type, updates) => {
-                if (type === "DELETE_PART") dispatch({ type, id: ctxMenu.part.id });
-                else if (type === "BRING_FORWARD") dispatch({ type, id: ctxMenu.part.id });
-                else if (type === "SEND_BACKWARD") dispatch({ type, id: ctxMenu.part.id });
-                else dispatch({ type, id: ctxMenu.part.id, updates });
-                setCtxMenu(null);
-              }}
-            />
-          )}
+          {ctxMenu && (() => {
+            const livePart = st.parts.find(p => p.id === ctxMenu.part.id) ?? ctxMenu.part;
+            return (
+              <ContextMenu
+                x={ctxMenu.x} y={ctxMenu.y} part={livePart} multiIds={ctxMenu.multiIds}
+                onClose={() => setCtxMenu(null)}
+                onAction={(type, updates, live) => {
+                  if (type === "DELETE_PARTS") {
+                    dispatch({ type: "DELETE_PARTS", ids: ctxMenu.multiIds });
+                    setMultiSelectedIds(new Set());
+                  } else if (type === "DELETE_PART") {
+                    dispatch({ type, id: ctxMenu.part.id });
+                  } else if (type === "BRING_FORWARD") dispatch({ type, id: ctxMenu.part.id });
+                  else if (type === "SEND_BACKWARD") dispatch({ type, id: ctxMenu.part.id });
+                  else dispatch({ type: live ? "UPDATE_PART_LIVE" : "UPDATE_PART", id: ctxMenu.part.id, updates });
+                  if (!live) setCtxMenu(null);
+                }}
+              />
+            );
+          })()}
 
           {/* Joint right-click menu */}
           {jointCtxMenu && (
@@ -1675,50 +2261,76 @@ export default function ZineMachine() {
               }}
             />
           )}
-        </div>
 
-        <RightSidebar />
+        {/* Floating left toolbar */}
+        <FloatingToolbar st={st} dispatch={dispatch} />
+
+        {/* Floating instruments toolbar */}
+        <FloatingInstruments st={st} dispatch={dispatch} />
       </div>
     </div>
   );
 }
 
 // ---------- Context menu ----------
-function ContextMenu({ x, y, part, onClose, onAction }) {
+function ContextMenu({ x, y, part, multiIds, onClose, onAction }) {
   const isStrip = part.type === "strip" || part.type === "slottedStrip";
   const isMotor = part.type === "motor";
-  const canExtend = isStrip && part.size < 15;
-  const canReduce = isStrip && part.size > 2;
   const curSpeed = part.speed ?? MOTOR_SPEED_DEG;
   const curDir = part.direction ?? 1;
 
+  const isBell = part.type === "bell";
+  const isMulti = multiIds && multiIds.length > 1;
   const items = [
-    { label: "Delete", danger: true, action: () => onAction("DELETE_PART") },
-    canExtend && { label: "Extend +1", action: () => onAction("UPDATE_PART", { size: part.size + 1 }) },
-    canReduce && { label: "Reduce −1", action: () => onAction("UPDATE_PART", { size: part.size - 1 }) },
-    !isMotor && { label: "Bring Forward", action: () => onAction("BRING_FORWARD") },
-    !isMotor && (part.zIndex ?? 0) > 0 && { label: "Send Backward", action: () => onAction("SEND_BACKWARD") },
-    isMotor && { separator: true },
-    isMotor && { label: curDir === 1 ? "↺ Set Counter-clockwise" : "↻ Set Clockwise", action: () => onAction("UPDATE_PART", { direction: curDir === 1 ? -1 : 1 }) },
-    isMotor && { separator: true },
-    isMotor && { label: `Slow — 45°/s${curSpeed === 45 ? "  ✓" : ""}`,  action: () => onAction("UPDATE_PART", { speed: 45 }) },
-    isMotor && { label: `Normal — 90°/s${curSpeed === 90 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 90 }) },
-    isMotor && { label: `Fast — 180°/s${curSpeed === 180 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 180 }) },
-    isMotor && { label: `Very Fast — 360°/s${curSpeed === 360 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 360 }) },
+    isMulti
+      ? { label: `Delete ${multiIds.length} selected parts`, danger: true, action: () => onAction("DELETE_PARTS") }
+      : { label: "Delete", danger: true, action: () => onAction("DELETE_PART") },
+    !isMulti && { label: "Duplicate", action: () => onAction("DUPLICATE_PART") },
+    !isMulti && !isMotor && !isBell && { label: "Bring Forward", action: () => onAction("BRING_FORWARD") },
+    !isMulti && !isMotor && !isBell && (part.zIndex ?? 0) > 0 && { label: "Send Backward", action: () => onAction("SEND_BACKWARD") },
+    !isMulti && isMotor && { separator: true },
+    !isMulti && isMotor && { label: curDir === 1 ? "↺ Set Counter-clockwise" : "↻ Set Clockwise", action: () => onAction("UPDATE_PART", { direction: curDir === 1 ? -1 : 1 }) },
+    !isMulti && isMotor && { separator: true },
+    !isMulti && isMotor && { label: `Slow — 45°/s${curSpeed === 45 ? "  ✓" : ""}`,  action: () => onAction("UPDATE_PART", { speed: 45 }) },
+    !isMulti && isMotor && { label: `Normal — 90°/s${curSpeed === 90 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 90 }) },
+    !isMulti && isMotor && { label: `Fast — 180°/s${curSpeed === 180 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 180 }) },
+    !isMulti && isMotor && { label: `Very Fast — 360°/s${curSpeed === 360 ? "  ✓" : ""}`, action: () => onAction("UPDATE_PART", { speed: 360 }) },
+    !isMulti && isBell && { separator: true },
+    ...Object.keys(NOTES).filter(() => !isMulti && isBell).map(note => ({
+      label: `♪ ${note}${part.note === note ? "  ✓" : ""}`,
+      action: () => onAction("UPDATE_PART", { note }),
+    })),
   ].filter(Boolean);
 
   return (
     <div
+      data-ctx-menu="1"
       className="absolute z-50 py-1 rounded shadow-lg"
       style={{
         left: x, top: y,
         background: COLORS.sidebar,
         border: `1px solid ${COLORS.divider}`,
-        minWidth: 160,
-        transform: "translate(4px, 4px)",
+        minWidth: 164,
+        transform: "translate(-50%, -50%)",
       }}
       onPointerDown={(e) => e.stopPropagation()}
     >
+      {/* Strip size slider */}
+      {!isMulti && isStrip && (
+        <div className="px-3 py-2 border-b" style={{ borderColor: COLORS.divider }}>
+          <div className="mono text-[10px] mb-1.5" style={{ color: COLORS.inkDim }}>
+            Size: {part.size} holes
+          </div>
+          <input
+            type="range" min={2} max={15} value={part.size}
+            onChange={(e) => onAction("UPDATE_PART", { size: parseInt(e.target.value) }, true)}
+            style={{ width: "100%", accentColor: COLORS.board }}
+          />
+          <div className="flex justify-between mono text-[9px]" style={{ color: COLORS.inkDim }}>
+            <span>2</span><span>15</span>
+          </div>
+        </div>
+      )}
       {items.map((item, i) =>
         item.separator
           ? <div key={i} style={{ height: 1, background: COLORS.divider, margin: "3px 0" }} />
@@ -1821,27 +2433,49 @@ function JointPin({ joint, onPointerDown, deletable, overrideX, overrideY, selec
 }
 
 // ---------- Rotation handle ----------
-function RotationHandle({ part, onPointerDown }) {
+function RotationHandle({ part, onPointerDown, hovered, onHoverChange, onSwitchPivot }) {
   const local = rotationHandleLocal(part);
   const rotated = rotate(local, part.rotation);
   const cx = (part.x + rotated.x) * GRID;
   const cy = (part.y + rotated.y) * GRID;
   const pivotIdx = part.pivotHoleIdx ?? 0;
-  const pivotWH = worldHoles(part)[pivotIdx];
+  const wh = worldHoles(part);
+  const pivotWH = wh[pivotIdx];
   const ax = pivotWH ? pivotWH.x * GRID : part.x * GRID;
   const ay = pivotWH ? pivotWH.y * GRID : part.y * GRID;
+
+  const isStrip = part.type === "strip" || part.type === "slottedStrip";
+  const otherIdx = isStrip ? (pivotIdx === 0 ? part.size - 1 : 0) : null;
+  // Ghost handle = where handle would be with the other pivot selected
+  const ghostLocal = isStrip && otherIdx !== null
+    ? rotationHandleLocal({ ...part, pivotHoleIdx: otherIdx })
+    : { x: -local.x, y: -local.y };
+  const ghostRotated = rotate(ghostLocal, part.rotation);
+  const gx = (part.x + ghostRotated.x) * GRID;
+  const gy = (part.y + ghostRotated.y) * GRID;
+
   return (
     <g>
       <line x1={ax} y1={ay} x2={cx} y2={cy} stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="3 3" opacity="0.8" />
-      <circle
-        cx={cx} cy={cy} r={8}
-        fill={COLORS.select}
-        stroke={COLORS.partEdge}
-        strokeWidth="1.4"
-        style={{ cursor: "grab" }}
-        onPointerDown={onPointerDown}
-      />
-      <circle cx={cx} cy={cy} r={2.2} fill={COLORS.partEdge} pointerEvents="none" />
+      {/* Invisible trigger zone at the opposite end — hovering here reveals the ghost */}
+      {isStrip && otherIdx !== null && (
+        <g
+          style={{ cursor: hovered ? "pointer" : "default" }}
+          onPointerDown={hovered ? (e) => { e.stopPropagation(); onSwitchPivot?.(); } : undefined}
+          onMouseEnter={() => onHoverChange?.(true)}
+          onMouseLeave={() => onHoverChange?.(false)}
+        >
+          <circle cx={gx} cy={gy} r={50} fill="transparent" />
+          {hovered && (
+            <circle cx={gx} cy={gy} r={8} fill={COLORS.select} opacity="0.35" stroke={COLORS.select} strokeWidth="1.4" strokeDasharray="3 2" />
+          )}
+        </g>
+      )}
+      {/* Active handle — large invisible hit area + small visible dot */}
+      <g style={{ cursor: "grab" }} onPointerDown={onPointerDown}>
+        <circle cx={cx} cy={cy} r={22} fill="transparent" />
+        <circle cx={cx} cy={cy} r={8} fill={COLORS.select} stroke={COLORS.partEdge} strokeWidth="1.4" />
+      </g>
     </g>
   );
 }
@@ -1913,6 +2547,38 @@ function TopBar({ st, dispatch, simPaused, setSimPaused }) {
 
         <button
           onClick={() => {
+            const data = { parts: st.parts, joints: st.joints, nextId: st.nextId };
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'zine-machine.json'; a.click();
+            URL.revokeObjectURL(url);
+          }}
+          className="mono text-[11px] px-2 py-1.5 rounded tool-btn"
+          style={{ background: "transparent", color: COLORS.inkDim, border: `1px solid ${COLORS.divider}` }}
+          title="Save design as file"
+        >SAVE</button>
+        <button
+          onClick={() => {
+            const input = document.createElement('input');
+            input.type = 'file'; input.accept = '.json';
+            input.onchange = (ev) => {
+              const file = ev.target.files?.[0]; if (!file) return;
+              const reader = new FileReader();
+              reader.onload = (re) => {
+                try { dispatch({ type: "LOAD_STATE", data: JSON.parse(re.target.result) }); }
+                catch(_) { alert("Invalid file."); }
+              };
+              reader.readAsText(file);
+            };
+            input.click();
+          }}
+          className="mono text-[11px] px-2 py-1.5 rounded tool-btn"
+          style={{ background: "transparent", color: COLORS.inkDim, border: `1px solid ${COLORS.divider}` }}
+          title="Load design from file"
+        >LOAD</button>
+        <button
+          onClick={() => {
             if (confirm("Clear the whole board?")) dispatch({ type: "CLEAR" });
           }}
           className="mono text-[11px] px-2 py-1.5 rounded tool-btn"
@@ -1968,129 +2634,236 @@ function IconBtn({ children, onClick, disabled, title }) {
   );
 }
 
-// ---------- Left sidebar ----------
-function LeftSidebar({ st, dispatch }) {
-  const toolGroup1 = [
-    { id: "select", icon: <MousePointer2 size={16} />, label: "Select" },
-    { id: "delete", icon: <Trash2 size={16} />, label: "Delete" },
-  ];
-  const jointTools = [
-    { id: "pivot", glyph: <PivotGlyph size={16} />, label: "Pivot", hint: "rotates freely" },
-    { id: "weld", glyph: <WeldGlyph size={16} />, label: "Weld", hint: "rigid lock" },
-    { id: "ground", glyph: <GroundGlyph size={16} />, label: "Ground", hint: "pin to board" },
-  ];
-
+// ---------- Shape icon (inline SVG for the shapes group) ----------
+function ShapeIcon({ size = 16 }) {
   return (
-    <div
-      className="flex flex-col border-r overflow-y-auto"
-      style={{ background: COLORS.sidebar, borderColor: COLORS.divider, width: 208 }}
-    >
-      <SidebarSection title="Tools">
-        <div className="flex flex-col gap-1">
-          {toolGroup1.map(t => (
-            <ToolButton
-              key={t.id}
-              active={st.tool === t.id}
-              onClick={() => dispatch({ type: "TOOL", tool: t.id })}
-              icon={t.icon}
-              label={t.label}
-            />
-          ))}
-        </div>
-      </SidebarSection>
-
-      <SidebarSection title="Joints">
-        <div className="flex flex-col gap-1">
-          {jointTools.map(t => (
-            <ToolButton
-              key={t.id}
-              active={st.tool === t.id}
-              onClick={() => dispatch({ type: "TOOL", tool: t.id })}
-              icon={t.glyph}
-              label={t.label}
-              hint={t.hint}
-            />
-          ))}
-        </div>
-      </SidebarSection>
-
-      <SidebarSection title="Strips">
-        <PartGrid
-          items={PALETTE.filter(p => p.type === "strip")}
-          active={st.palette}
-          onPick={(id) => dispatch({ type: "PALETTE", id })}
-        />
-      </SidebarSection>
-
-      <SidebarSection title="Slotted">
-        <PartGrid
-          items={PALETTE.filter(p => p.type === "slottedStrip")}
-          active={st.palette}
-          onPick={(id) => dispatch({ type: "PALETTE", id })}
-        />
-      </SidebarSection>
-
-      <SidebarSection title="Shapes">
-        <PartGrid
-          items={PALETTE.filter(p => ["triangle","square","pentagon"].includes(p.type))}
-          active={st.palette}
-          onPick={(id) => dispatch({ type: "PALETTE", id })}
-          big
-        />
-      </SidebarSection>
-
-      <SidebarSection title="Motor">
-        <PartGrid
-          items={PALETTE.filter(p => p.type === "motor")}
-          active={st.palette}
-          onPick={(id) => dispatch({ type: "PALETTE", id })}
-          big
-        />
-      </SidebarSection>
-
-      <div className="mt-auto px-4 py-3 mono text-[10px]" style={{ color: COLORS.inkDim, lineHeight: 1.6 }}>
-        M · select tool<br />
-        R, ⇧R · rotate 15°<br />
-        ⌫ · delete selected<br />
-        Esc · back to select
-      </div>
-    </div>
+    <svg width={size} height={size} viewBox="0 0 16 16">
+      <polygon points="8,2 14,14 2,14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function StripIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16">
+      <rect x="1" y="6" width="14" height="4" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="4" cy="8" r="1.2" fill="currentColor" />
+      <circle cx="8" cy="8" r="1.2" fill="currentColor" />
+      <circle cx="12" cy="8" r="1.2" fill="currentColor" />
+    </svg>
+  );
+}
+function SlotIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16">
+      <rect x="1" y="6" width="14" height="4" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="3" y="7.5" width="10" height="1" rx="0.5" fill="currentColor" opacity="0.6" />
+    </svg>
   );
 }
 
-function SidebarSection({ title, children }) {
+// ---------- Floating left toolbar ----------
+function FloatingToolbar({ st, dispatch }) {
+  const [openGroup, setOpenGroup] = useState(null);
+
+  // Close submenu after a part or joint is placed
+  const prevPartsLen = useRef(st.parts.length);
+  const prevJointsLen = useRef(st.joints.length);
+  useEffect(() => {
+    if (st.parts.length > prevPartsLen.current || st.joints.length > prevJointsLen.current) {
+      setOpenGroup(null);
+    }
+    prevPartsLen.current = st.parts.length;
+    prevJointsLen.current = st.joints.length;
+  }, [st.parts.length, st.joints.length]);
+
+  const isJointActive = ["pivot", "weld", "ground"].includes(st.tool);
+const isShapeActive = PALETTE.filter(p => ["triangle","square","pentagon"].includes(p.type)).some(p => p.id === st.palette);
+
+  const toolItems = [
+    { id: "select", icon: <MousePointer2 size={15} />,  label: "Select",  active: st.tool === "select" && !openGroup, direct: true },
+    { id: "hand",   icon: <Hand size={15} />,          label: "Pan",     active: st.tool === "hand"   && !openGroup, direct: true },
+    null,
+    { id: "joints", icon: <PivotIcon size={15} />,       label: "Joints",  active: isJointActive || openGroup === "joints", group: true },
+    { id: "strip",  icon: <StripIcon size={15} />,    label: "Strip",   active: st.palette === "strip"  && !openGroup, palette: "strip" },
+    { id: "slot",   icon: <SlotIcon size={15} />,     label: "Slotted", active: st.palette === "slot"   && !openGroup, palette: "slot" },
+    { id: "shapes", icon: <ShapeIcon size={15} />,    label: "Shapes",  active: isShapeActive || openGroup === "shapes", group: true },
+    { id: "motor",  icon: <CircleIcon size={15} />,   label: "Motor",   active: st.palette === "motor" && !openGroup, palette: "motor" },
+  ];
+
+  const GROUP_DEFAULTS = {
+    joints: () => dispatch({ type: "TOOL", tool: "pivot" }),
+    shapes: () => dispatch({ type: "PALETTE", id: "triangle" }),
+  };
+
+  const handleClick = (t) => {
+    if (t.direct) { dispatch({ type: "TOOL", tool: t.id }); setOpenGroup(null); }
+    else if (t.palette) { dispatch({ type: "PALETTE", id: t.palette }); setOpenGroup(null); }
+    else if (t.group) {
+      const wasOpen = openGroup === t.id;
+      setOpenGroup(wasOpen ? null : t.id);
+      if (!wasOpen) GROUP_DEFAULTS[t.id]?.();
+    }
+  };
+
   return (
-    <div className="px-3 pt-4 pb-3 border-b" style={{ borderColor: COLORS.divider }}>
+    <div className="absolute left-4 top-4 z-20 flex gap-2 items-start pointer-events-none">
+      {/* Icon strip */}
       <div
-        className="mono text-[10px] uppercase mb-2 px-1"
-        style={{ color: COLORS.inkDim, letterSpacing: "0.14em" }}
+        className="flex flex-col gap-0.5 rounded-xl p-1.5 shadow-xl pointer-events-auto"
+        style={{ background: COLORS.sidebar, border: `1px solid ${COLORS.divider}` }}
       >
-        {title}
+        {toolItems.map((t, i) => t === null ? (
+          <div key={i} style={{ height: 1, background: COLORS.divider, margin: "2px 0" }} />
+        ) : (
+          <button
+            key={t.id}
+            className="relative w-9 h-9 rounded-lg flex items-center justify-center tool-btn"
+            style={{
+              background: t.active ? `${COLORS.select}18` : "transparent",
+              color: COLORS.ink,
+              border: `1.5px solid ${t.active ? COLORS.select + "55" : "transparent"}`,
+            }}
+            title={t.label}
+            onClick={() => handleClick(t)}
+          >
+            {t.icon}
+            {t.group && (
+              <span style={{ position: "absolute", right: 2, bottom: 2, opacity: 0.5, fontSize: 6 }}>▶</span>
+            )}
+          </button>
+        ))}
       </div>
-      {children}
+
+      {/* Submenu panel */}
+      {openGroup && (
+        <div
+          className="rounded-xl p-2 shadow-xl pointer-events-auto"
+          style={{ background: COLORS.sidebar, border: `1px solid ${COLORS.divider}` }}
+        >
+          {openGroup === "joints" && (
+            <div className="flex flex-col gap-0.5" style={{ minWidth: 140 }}>
+              {[
+                { id: "pivot",  glyph: <PivotGlyph size={14} />,  label: "Pivot",  hint: "rotates freely" },
+                { id: "weld",   glyph: <WeldGlyph size={14} />,   label: "Weld",   hint: "rigid lock" },
+                { id: "ground", glyph: <GroundGlyph size={14} />, label: "Ground", hint: "pin to board" },
+              ].map(j => (
+                <button
+                  key={j.id}
+                  className="flex items-center gap-2 px-2 py-1.5 rounded-lg tool-btn"
+                  style={{
+                    background: st.tool === j.id ? COLORS.board : "transparent",
+                    color: st.tool === j.id ? COLORS.shell : COLORS.ink,
+                  }}
+                  onClick={() => { dispatch({ type: "TOOL", tool: j.id }); setOpenGroup(null); }}
+                >
+                  {j.glyph}
+                  <span className="mono text-xs">{j.label}</span>
+                  <span className="mono text-[9px] ml-auto" style={{ opacity: 0.5 }}>{j.hint}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+
+          {openGroup === "shapes" && (
+            <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+              {PALETTE.filter(p => ["triangle","square","pentagon"].includes(p.type)).map(def => {
+                const isActive = st.palette === def.id;
+                return (
+                  <button key={def.id}
+                    className="rounded-lg tool-btn flex flex-col items-center justify-center p-1"
+                    style={{
+                      background: isActive ? COLORS.board : COLORS.shellDeep,
+                      border: `1px solid ${isActive ? COLORS.board : COLORS.divider}`,
+                    }}
+                    onClick={() => { dispatch({ type: "PALETTE", id: def.id }); setOpenGroup(null); }}
+                  >
+                    <PalettePreview def={def} big />
+                    <div className="mono text-[9px]" style={{ color: isActive ? COLORS.shell : COLORS.inkDim }}>
+                      {def.type.slice(0,4).toUpperCase()}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function ToolButton({ active, onClick, icon, label, hint }) {
+// ---------- Floating instruments toolbar ----------
+function FloatingInstruments({ st, dispatch }) {
+  const [expanded, setExpanded] = useState(false);
+  const isBellActive = st.palette === "bell";
+
+  const stampItems = [
+    { id: "finger-right", glyph: "☞", label: "Point Right" },
+    { id: "finger-left",  glyph: "☜", label: "Point Left" },
+  ];
+
   return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-2 px-2 py-1.5 rounded tool-btn text-left"
-      style={{
-        background: active ? COLORS.board : "transparent",
-        color: active ? COLORS.shell : COLORS.ink,
-        border: `1px solid ${active ? COLORS.board : "transparent"}`,
-      }}
-    >
-      <span className="w-5 flex items-center justify-center">{icon}</span>
-      <span className="mono text-xs" style={{ letterSpacing: "0.04em" }}>{label}</span>
-      {hint && (
-        <span className="mono text-[9px] ml-auto" style={{ opacity: active ? 0.8 : 0.5 }}>
-          {hint}
-        </span>
-      )}
-    </button>
+    <div className="absolute right-4 top-4 z-20 pointer-events-none">
+      <div
+        className="rounded-xl shadow-xl pointer-events-auto overflow-hidden"
+        style={{ background: COLORS.sidebar, border: `1px solid ${COLORS.divider}`, minWidth: 44 }}
+      >
+        <button
+          className="w-full flex items-center gap-2 px-2.5 py-2 tool-btn"
+          style={{ color: expanded ? COLORS.ink : COLORS.inkDim }}
+          onClick={() => setExpanded(e => !e)}
+          title="Sounds & Graphics"
+        >
+          <Music size={15} />
+          {expanded && <span className="mono text-[10px]" style={{ letterSpacing: "0.1em" }}>SOUNDS</span>}
+          <ChevronRight size={11} style={{ marginLeft: expanded ? "auto" : 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform 150ms" }} />
+        </button>
+
+        {expanded && (
+          <div className="border-t" style={{ borderColor: COLORS.divider }}>
+            <div className="px-2 py-2 flex flex-col gap-1">
+              <div className="mono text-[9px] px-1 pb-0.5" style={{ color: COLORS.inkDim, letterSpacing: "0.1em" }}>SOUNDS</div>
+              <button
+                className="flex items-center gap-2 px-2 py-1.5 rounded-lg tool-btn"
+                style={{
+                  background: isBellActive ? COLORS.board : "transparent",
+                  color: isBellActive ? COLORS.shell : COLORS.ink,
+                  border: `1px solid ${isBellActive ? COLORS.board : COLORS.divider}`,
+                }}
+                onClick={() => dispatch({ type: "PALETTE", id: "bell" })}
+                title="Bell — triggers a note when any part passes over it"
+              >
+                <Bell size={13} />
+                <span className="mono text-xs">Bell</span>
+              </button>
+            </div>
+            <div className="px-2 pb-2 flex flex-col gap-1 border-t" style={{ borderColor: COLORS.divider }}>
+              <div className="mono text-[9px] px-1 pt-2 pb-0.5" style={{ color: COLORS.inkDim, letterSpacing: "0.1em" }}>GRAPHICS</div>
+              {stampItems.map(s => {
+                const isActive = st.palette === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    className="flex items-center gap-2 px-2 py-1.5 rounded-lg tool-btn"
+                    style={{
+                      background: isActive ? COLORS.board : "transparent",
+                      color: isActive ? COLORS.shell : COLORS.ink,
+                      border: `1px solid ${isActive ? COLORS.board : COLORS.divider}`,
+                    }}
+                    onClick={() => dispatch({ type: "PALETTE", id: s.id })}
+                    title={s.label}
+                  >
+                    <span style={{ fontFamily: "'Noto Symbols 2', sans-serif", fontSize: 16, lineHeight: 1 }}>{s.glyph}</span>
+                    <span className="mono text-xs">{s.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2175,60 +2948,9 @@ function PartGrid({ items, active, onPick, big = false }) {
   );
 }
 
-// ---------- Right sidebar (future: instruments) ----------
-function RightSidebar() {
-  const slots = [
-    { icon: <Music size={14} />, label: "Synth" },
-    { icon: <Waves size={14} />, label: "Sampler" },
-    { icon: <CircleIcon size={14} />, label: "Trigger" },
-  ];
-  return (
-    <div
-      className="flex flex-col border-l"
-      style={{ background: COLORS.sidebar, borderColor: COLORS.divider, width: 208 }}
-    >
-      <div className="px-3 pt-4 pb-3 border-b" style={{ borderColor: COLORS.divider }}>
-        <div
-          className="mono text-[10px] uppercase mb-2 px-1"
-          style={{ color: COLORS.inkDim, letterSpacing: "0.14em" }}
-        >
-          Instruments
-        </div>
-        <div
-          className="mono text-[10px] px-2 py-1.5 rounded"
-          style={{ background: COLORS.shellDeep, color: COLORS.inkDim, letterSpacing: "0.04em" }}
-        >
-          coming in later rounds
-        </div>
-      </div>
-
-      <div className="px-3 pt-4 pb-3 flex flex-col gap-1.5">
-        {slots.map(s => (
-          <div
-            key={s.label}
-            className="flex items-center gap-2 px-2 py-2 rounded"
-            style={{
-              background: COLORS.shellDeep,
-              border: `1px dashed ${COLORS.divider}`,
-              color: COLORS.inkDim,
-            }}
-          >
-            <span className="w-5 flex items-center justify-center">{s.icon}</span>
-            <span className="mono text-xs" style={{ letterSpacing: "0.04em" }}>{s.label}</span>
-            <span className="mono text-[9px] ml-auto opacity-60">locked</span>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-auto px-4 py-3 mono text-[10px]" style={{ color: COLORS.inkDim, lineHeight: 1.6 }}>
-        In a later round, drop an instrument on any hole and the mechanism will trigger it when it passes over.
-      </div>
-    </div>
-  );
-}
 
 // ---------- Status chip ----------
-function StatusChip({ st, hoverHole }) {
+function StatusChip({ st, hoverHole, simJammed }) {
   const parts = st.parts.length;
   const joints = st.joints.length;
   const mode =
@@ -2240,25 +2962,41 @@ function StatusChip({ st, hoverHole }) {
     "select";
 
   return (
-    <div
-      className="absolute left-4 bottom-4 mono text-[10px] px-2.5 py-1.5 rounded flex items-center gap-3"
-      style={{
-        background: COLORS.sidebar,
-        color: COLORS.inkDim,
-        border: `1px solid ${COLORS.divider}`,
-        letterSpacing: "0.04em",
-      }}
-    >
-      <span>{mode}</span>
-      <span style={{ color: COLORS.divider }}>│</span>
-      <span>{parts} part{parts !== 1 ? "s" : ""}</span>
-      <span style={{ color: COLORS.divider }}>│</span>
-      <span>{joints} joint{joints !== 1 ? "s" : ""}</span>
-      {hoverHole && (
-        <>
-          <span style={{ color: COLORS.divider }}>│</span>
-          <span>{hoverHole.x},{hoverHole.y}</span>
-        </>
+    <div className="absolute left-4 bottom-4 flex items-center gap-2">
+      <div
+        className="mono text-[10px] px-2.5 py-1.5 rounded flex items-center gap-3"
+        style={{
+          background: COLORS.sidebar,
+          color: COLORS.inkDim,
+          border: `1px solid ${COLORS.divider}`,
+          letterSpacing: "0.04em",
+        }}
+      >
+        <span>{mode}</span>
+        <span style={{ color: COLORS.divider }}>│</span>
+        <span>{parts} part{parts !== 1 ? "s" : ""}</span>
+        <span style={{ color: COLORS.divider }}>│</span>
+        <span>{joints} joint{joints !== 1 ? "s" : ""}</span>
+        {hoverHole && (
+          <>
+            <span style={{ color: COLORS.divider }}>│</span>
+            <span>{hoverHole.x},{hoverHole.y}</span>
+          </>
+        )}
+      </div>
+      {simJammed && (
+        <div
+          className="mono text-[10px] px-2.5 py-1.5 rounded flex items-center gap-1.5"
+          style={{
+            background: COLORS.sidebar,
+            color: COLORS.weld,
+            border: `1px solid ${COLORS.weld}55`,
+            letterSpacing: "0.04em",
+          }}
+        >
+          <AlertTriangle size={11} />
+          <span>Geometry impossible — motor paused</span>
+        </div>
       )}
     </div>
   );
