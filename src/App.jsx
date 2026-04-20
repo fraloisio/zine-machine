@@ -1840,19 +1840,14 @@ export default function ZineMachine() {
     };
   }, [st.selectedId, st.parts, selectedJointId]);
 
-  // Auto-show / reposition context menu whenever selection changes
+  // Auto-show context menu only for multi-select (not single select — use right-click for that)
   useEffect(() => {
-    if (st.mode !== "build") { setCtxMenu(null); return; }
-
-    let part = null;
-    let multiIds = null;
-    if (multiSelectedIds.size > 1) {
-      part = st.parts.find(p => multiSelectedIds.has(p.id));
-      multiIds = [...multiSelectedIds];
-    } else if (st.selectedId) {
-      part = st.parts.find(p => p.id === st.selectedId);
+    if (st.mode !== "build" || multiSelectedIds.size < 2) {
+      if (multiSelectedIds.size < 2) setCtxMenu(null);
+      return;
     }
 
+    const part = st.parts.find(p => multiSelectedIds.has(p.id));
     if (!part) { setCtxMenu(null); return; }
 
     const svg = svgRef.current;
@@ -1863,8 +1858,8 @@ export default function ZineMachine() {
     const sx = part.x * GRID * z - cam.x + rect.left;
     const sy = part.y * GRID * z - cam.y + rect.top;
 
-    setCtxMenu({ x: sx, y: Math.max(100, sy - 60), part, multiIds });
-  }, [st.selectedId, multiSelectedIds, st.mode]); // eslint-disable-line
+    setCtxMenu({ x: sx, y: Math.max(100, sy - 60), part, multiIds: [...multiSelectedIds] });
+  }, [multiSelectedIds, st.mode]); // eslint-disable-line
 
   useEffect(() => {
     if (!jointCtxMenu) return;
