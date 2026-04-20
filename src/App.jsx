@@ -536,7 +536,7 @@ function StampShape({ part, ghost = false }) {
   // ☞ points right → cuff is on the left → shift text rightward.
   // ☜ points left  → cuff is on the right → shift text leftward.
   const textX = isMirror ? -s * 0.48 : s * 0.48;
-  const textY = s * 0.38;
+  const textY = s * 0.48;
   const fid = `stamp-bg-${part.id ?? 'ghost'}`;
   return (
     <g opacity={ghost ? 0.45 : 1}>
@@ -1236,6 +1236,7 @@ export default function ZineMachine() {
   const lastTimeRef = useRef(null);
   const pausedRef = useRef(false);
   const triggeredBellsRef = useRef(new Set());
+  const stampWeldRef = useRef(null); // { partId, holeIdx } set during stamp drag, applied on drop
 
   useEffect(() => { pausedRef.current = simPaused; }, [simPaused]);
   useEffect(() => { setHoverRotHandle(false); }, [st.selectedId]);
@@ -1276,6 +1277,15 @@ export default function ZineMachine() {
         lastTimeRef.current = time;
         const { parts: nextParts, jammed } = stepSimulation(cur, initJoints, cm, wt, dt);
         cur = nextParts;
+        // Weld stamps to their host part holes
+        cur = cur.map(stamp => {
+          if (stamp.type !== "stamp" || !stamp.weldedTo) return stamp;
+          const host = cur.find(p => p.id === stamp.weldedTo.partId);
+          if (!host) return stamp;
+          const wh = worldHoles(host)[stamp.weldedTo.holeIdx];
+          if (!wh) return stamp;
+          return { ...stamp, x: wh.x, y: wh.y, rotation: host.rotation || 0 };
+        });
         setSimJammed(jammed);
         // Bell collision detection
         const bellParts = initParts.filter(p => p.type === "bell");
@@ -1486,9 +1496,12 @@ export default function ZineMachine() {
       if (draggedPart) {
         const localHoles = getLocalHoles(draggedPart);
         let bestDist = 0.9; // snap radius in grid units
+        let weldTarget = null;
         for (const other of st.parts) {
           if (other.id === drag.id) continue;
-          for (const th of worldHoles(other)) {
+          const otherHoles = worldHoles(other);
+          for (let hi = 0; hi < otherHoles.length; hi++) {
+            const th = otherHoles[hi];
             for (const lh of localHoles) {
               const rot = rotate(lh, rotation);
               const d = Math.hypot((rawX + rot.x) - th.x, (rawY + rot.y) - th.y);
@@ -1496,10 +1509,12 @@ export default function ZineMachine() {
                 bestDist = d;
                 snappedToPartHole = { x: th.x - rot.x, y: th.y - rot.y };
                 newSnapHint = { x: th.x, y: th.y };
+                if (draggedPart.type === "stamp") weldTarget = { partId: other.id, holeIdx: hi };
               }
             }
           }
         }
+        if (draggedPart.type === "stamp") stampWeldRef.current = weldTarget;
       }
       setSnapHint(newSnapHint);
 
@@ -1560,6 +1575,12 @@ export default function ZineMachine() {
       return;
     }
     if (drag?.kind === "space-pan") { setDrag(null); return; }
+    // Apply stamp weld on drop
+    if (drag?.kind === "move" && drag.origPart?.type === "stamp") {
+      const wt = stampWeldRef.current;
+      dispatch({ type: "UPDATE_PART", id: drag.id, updates: { weldedTo: wt ?? null } });
+      stampWeldRef.current = null;
+    }
     setDrag(null);
     setSnapHint(null);
   };
