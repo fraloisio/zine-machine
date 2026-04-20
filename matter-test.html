@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Zine Machine — Chain Linkage</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #c8345a; display: flex; align-items: center; justify-content: center; height: 100vh; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="c" width="950" height="600"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 950, H = 600;
+
+function cci(ax,ay,ra,bx,by,rb) {
+  const dx=bx-ax, dy=by-ay, d=Math.hypot(dx,dy);
+  if (d>ra+rb+0.1 || d<Math.abs(ra-rb)-0.1 || d<1e-9) return null;
+  const a=(ra*ra-rb*rb+d*d)/(2*d), h=Math.sqrt(Math.max(0,ra*ra-a*a));
+  const mx=ax+a*dx/d, my=ay+a*dy/d;
+  return [{x:mx+h*dy/d,y:my-h*dx/d},{x:mx-h*dy/d,y:my+h*dx/d}];
+}
+function pick(sols,ref) {
+  if (!sols) return ref;
+  return Math.hypot(sols[0].x-ref.x,sols[0].y-ref.y)<=Math.hypot(sols[1].x-ref.x,sols[1].y-ref.y)?sols[0]:sols[1];
+}
+
+function pegboard() {
+  ctx.fillStyle='#c8345a'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#a82848';
+  for (let x=20;x<W;x+=28) for (let y=20;y<H;y+=28) {
+    ctx.beginPath(); ctx.arc(x,y,2.2,0,Math.PI*2); ctx.fill();
+  }
+}
+
+function strip(x1,y1,x2,y2,w=14) {
+  const a=Math.atan2(y2-y1,x2-x1), px=Math.sin(a)*w/2, py=-Math.cos(a)*w/2;
+  ctx.beginPath();
+  ctx.moveTo(x1+px,y1+py); ctx.lineTo(x2+px,y2+py);
+  ctx.lineTo(x2-px,y2-py); ctx.lineTo(x1-px,y1-py);
+  ctx.closePath(); ctx.fillStyle='#f4ecd6'; ctx.fill();
+  ctx.strokeStyle='#1a0a12'; ctx.lineWidth=2; ctx.stroke();
+  // holes
+  const len=Math.hypot(x2-x1,y2-y1), n=Math.max(2,Math.floor(len/22));
+  for (let i=0;i<=n;i++) {
+    const t=i/n;
+    ctx.beginPath(); ctx.arc(x1+(x2-x1)*t, y1+(y2-y1)*t, 2.8,0,Math.PI*2);
+    ctx.fillStyle='#1a0a1266'; ctx.fill();
+  }
+}
+
+function dot(x,y,r,c) {
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=c; ctx.fill();
+  ctx.strokeStyle='#1a0a12'; ctx.lineWidth=1.5; ctx.stroke();
+}
+
+function xPin(x,y) {
+  ctx.fillStyle='#e53e3e33';
+  ctx.fillRect(x-9,y-9,18,18);
+  ctx.strokeStyle='#e53e3e'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.moveTo(x-7,y-7); ctx.lineTo(x+7,y+7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+7,y-7); ctx.lineTo(x-7,y+7); ctx.stroke();
+}
+
+function plate(gx,gy,bx,by) {
+  const ang=Math.atan2(by-gy,bx-gx);
+  const side=Math.hypot(bx-gx,by-gy)*1.05;
+  ctx.save();
+  ctx.translate(gx,gy); ctx.rotate(ang);
+  ctx.beginPath(); ctx.roundRect(-8,-8,side+16,side+16,6);
+  ctx.fillStyle='#f4ecd6'; ctx.fill();
+  ctx.strokeStyle='#1a0a12'; ctx.lineWidth=2; ctx.stroke();
+  for (let i=0;i<=2;i++) for (let j=0;j<=2;j++) {
+    ctx.beginPath(); ctx.arc(i*side/2,j*side/2,3,0,Math.PI*2);
+    ctx.fillStyle='#1a0a1255'; ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ── Parameters ────────────────────────────────────────────────────────────────
+const MX=145, MY=415, MR=70;
+
+// Left 4-bar
+const G1={x:390,y:440};
+const CL1=182, RL1=150;   // coupler (crank→K1), rocker (G1→K1)
+
+// Right 4-bar (K1 drives K2)
+const G2={x:660,y:528};
+const CL2=218, RL2=192;   // coupler (K1→K2), rocker (G2→K2)
+
+// Diagonal → bracket
+const BR_GND={x:858,y:108};
+const DIAG=295, BR_ARM=82;  // diag rod (K2→BR_blue), bracket arm (BR_GND→BR_blue)
+
+let K1p={x:355,y:320}, K2p={x:620,y:375}, BRp={x:828,y:170};
+let t=0;
+
+function frame() {
+  t += 0.020;
+  pegboard();
+
+  // Motor
+  ctx.beginPath(); ctx.arc(MX,MY,MR+5,0,Math.PI*2); ctx.fillStyle='#8a1c36'; ctx.fill();
+  ctx.beginPath(); ctx.arc(MX,MY,MR,0,Math.PI*2);
+  ctx.fillStyle='#f5c518'; ctx.fill(); ctx.strokeStyle='#1a0a12'; ctx.lineWidth=2.5; ctx.stroke();
+  ctx.strokeStyle='#1a0a1244'; ctx.lineWidth=2;
+  for (let i=0;i<4;i++) {
+    const a=t+i*Math.PI/2;
+    ctx.beginPath(); ctx.moveTo(MX,MY); ctx.lineTo(MX+MR*Math.cos(a),MY+MR*Math.sin(a)); ctx.stroke();
+  }
+  dot(MX,MY,10,'#1a0a12'); dot(MX,MY,5,'#f5c518');
+  // direction arrow
+  ctx.beginPath(); ctx.arc(MX,MY,MR-20,0.3,1.4); ctx.strokeStyle='#1a0a1266'; ctx.lineWidth=2; ctx.stroke();
+  ctx.save(); ctx.translate(MX+(MR-20)*Math.cos(1.4),MY+(MR-20)*Math.sin(1.4));
+  ctx.rotate(1.4+Math.PI/2); ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-4,7); ctx.lineTo(4,7);
+  ctx.closePath(); ctx.fillStyle='#1a0a1266'; ctx.fill(); ctx.restore();
+
+  const cpx=MX+MR*Math.cos(t), cpy=MY+MR*Math.sin(t);
+
+  // ── Left 4-bar ──────────────────────────────────────────────────────────────
+  const s1=cci(cpx,cpy,CL1,G1.x,G1.y,RL1);
+  const K1=pick(s1,K1p); K1p=K1;
+
+  if (s1) {
+    // rocker extends past K1 to give the blue "tail"
+    const tx=K1.x+(K1.x-G1.x)*0.65, ty=K1.y+(K1.y-G1.y)*0.65;
+    strip(G1.x,G1.y,tx,ty);
+    strip(cpx,cpy,K1.x,K1.y);
+    xPin(G1.x,G1.y);
+    dot(K1.x,K1.y,7,'#3ddc6a');
+    dot(tx,ty,6,'#4aa3ff');
+    dot(cpx,cpy,6,'#3ddc6a');
+  }
+
+  // ── Right 4-bar ─────────────────────────────────────────────────────────────
+  const s2=cci(K1.x,K1.y,CL2,G2.x,G2.y,RL2);
+  const K2=pick(s2,K2p); K2p=K2;
+
+  if (s2) {
+    // coupling rod K1→K2 (the coupler) and rocker G2→K2 extended upward
+    strip(K1.x,K1.y,K2.x,K2.y);
+    const ux=K2.x+(K2.x-G2.x)*0.55, uy=K2.y+(K2.y-G2.y)*0.55;
+    strip(G2.x,G2.y,ux,uy);
+    xPin(G2.x,G2.y);
+    dot(K2.x,K2.y,6,'#4aa3ff');
+    dot(ux,uy,5,'#d0c0b0');
+  }
+
+  // ── Diagonal rod → bracket plate ────────────────────────────────────────────
+  const s3=cci(K2.x,K2.y,DIAG,BR_GND.x,BR_GND.y,BR_ARM);
+  const BR=pick(s3,BRp); BRp=BR;
+
+  if (s3) {
+    // draw plate first (behind rod)
+    plate(BR_GND.x,BR_GND.y,BR.x,BR.y);
+    strip(K2.x,K2.y,BR.x,BR.y);
+    xPin(BR_GND.x,BR_GND.y);
+    dot(BR.x,BR.y,6,'#4aa3ff');
+    dot(K2.x,K2.y,6,'#4aa3ff');
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

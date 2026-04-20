@@ -1263,6 +1263,7 @@ export default function ZineMachine() {
     const cm = buildConstraintMap(initParts, initJoints);
     const wt = buildWeldTransforms(initParts, initJoints);
     let cur = initParts;
+
     simRef.current = { constraintMap: cm, weldTransforms: wt, joints: initJoints, getCur: () => cur };
     lastTimeRef.current = null;
     const loop = (time) => {
@@ -1317,6 +1318,29 @@ export default function ZineMachine() {
             triggeredBellsRef.current.delete(bell.id);
           }
         }
+
+        // Simple joint distance logging with part info
+        if (window._zineLogs === undefined) window._zineLogs = [];
+        const logFrame = { frame: window._zineLogs.length, joints: [] };
+        for (const joint of initJoints) {
+          const entries = cm.get(joint.id);
+          if (!entries || entries.length < 2) continue;
+          const [entA, entB] = entries;
+          const pA = cur.find(p => p.id === entA.partId);
+          const pB = cur.find(p => p.id === entB.partId);
+          if (!pA || !pB) continue;
+          const whA = simWorldHole(pA, entA.holeIdx);
+          const whB = simWorldHole(pB, entB.holeIdx);
+          const dist = Math.hypot(whA.x - whB.x, whA.y - whB.y);
+          logFrame.joints.push({
+            id: joint.id,
+            parts: [entA.partId, entB.partId],
+            partTypes: [pA.type, pB.type],
+            distance: Number(dist.toFixed(4))
+          });
+        }
+        window._zineLogs.push(logFrame);
+
         setSimParts([...cur]);
         rafRef.current = requestAnimationFrame(loop);
       } catch (err) {
@@ -2612,6 +2636,22 @@ function TopBar({ st, dispatch, simPaused, setSimPaused }) {
           style={{ background: "transparent", color: COLORS.inkDim, border: `1px solid ${COLORS.divider}` }}
           title="Load design from file"
         >LOAD</button>
+        <button
+          onClick={() => {
+            if (window._zineLogs && window._zineLogs.length > 0) {
+              const blob = new Blob([JSON.stringify(window._zineLogs, null, 2)], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url; a.download = `zine_log_${Date.now()}.json`; a.click();
+              URL.revokeObjectURL(url);
+            } else {
+              alert("No logs recorded. Run a simulation with logging enabled.");
+            }
+          }}
+          className="mono text-[11px] px-2 py-1.5 rounded tool-btn"
+          style={{ background: "transparent", color: window._zineLogs?.length > 0 ? COLORS.ink : COLORS.inkDim, border: `1px solid ${COLORS.divider}` }}
+          title="Download simulation logs"
+        >LOG</button>
         <button
           onClick={() => {
             if (confirm("Clear the whole board?")) dispatch({ type: "CLEAR" });

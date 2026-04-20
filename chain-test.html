@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Chain Linkage — Kinematic Demo 3</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#0f0a0d;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:8px}
+    canvas{display:block}
+    p{color:#f4ecd655;font:12px monospace}
+  </style>
+</head>
+<body>
+<canvas id="c" width="920" height="480"></canvas>
+<p>3× chained 4-bar · motor → A-frame → V-shape → rocking block · cci+pick</p>
+<script>
+const C=document.getElementById('c'),ctx=C.getContext('2d');
+const W=920,H=480;
+
+// ── Math ──────────────────────────────────────────────────────────────────────
+function cci(ax,ay,ra,bx,by,rb){
+  const dx=bx-ax,dy=by-ay,d=Math.hypot(dx,dy);
+  if(d>ra+rb+.01||d<Math.abs(ra-rb)-.01||d<1e-9)return null;
+  const a=(ra*ra-rb*rb+d*d)/(2*d),h=Math.sqrt(Math.max(0,ra*ra-a*a));
+  const mx=ax+a*dx/d,my=ay+a*dy/d;
+  return[{x:mx+h*dy/d,y:my-h*dx/d},{x:mx-h*dy/d,y:my+h*dx/d}];
+}
+function pick(s,r){
+  return Math.hypot(s[0].x-r.x,s[0].y-r.y)<=Math.hypot(s[1].x-r.x,s[1].y-r.y)?s[0]:s[1];
+}
+
+// ── Draw ──────────────────────────────────────────────────────────────────────
+function rod(x1,y1,x2,y2,w,c){
+  const a=Math.atan2(y2-y1,x2-x1),px=Math.sin(a)*w/2,py=-Math.cos(a)*w/2;
+  ctx.beginPath();
+  ctx.moveTo(x1+px,y1+py);ctx.lineTo(x2+px,y2+py);
+  ctx.lineTo(x2-px,y2-py);ctx.lineTo(x1-px,y1-py);
+  ctx.closePath();ctx.fillStyle=c;ctx.fill();
+  ctx.strokeStyle='#0f0a0d';ctx.lineWidth=1.5;ctx.stroke();
+}
+function dot(x,y,r,c){ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();}
+function cross(x,y){
+  ctx.strokeStyle='#cc4444';ctx.lineWidth=2.5;
+  ctx.beginPath();ctx.moveTo(x-7,y-7);ctx.lineTo(x+7,y+7);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x+7,y-7);ctx.lineTo(x-7,y+7);ctx.stroke();
+}
+function gear(x,y,r,teeth,angle,fill,stroke){
+  const ir=r-r*.22;
+  ctx.beginPath();
+  for(let i=0;i<teeth;i++){
+    const a0=angle+i*2*Math.PI/teeth,a1=a0+Math.PI/teeth*.6,
+          a2=a1+Math.PI/teeth*.4,a3=a2+Math.PI/teeth*.6;
+    i?ctx.lineTo(x+ir*Math.cos(a0),y+ir*Math.sin(a0))
+     :ctx.moveTo(x+ir*Math.cos(a0),y+ir*Math.sin(a0));
+    ctx.lineTo(x+r*Math.cos(a1),y+r*Math.sin(a1));
+    ctx.lineTo(x+r*Math.cos(a2),y+r*Math.sin(a2));
+    ctx.lineTo(x+ir*Math.cos(a3),y+ir*Math.sin(a3));
+  }
+  ctx.closePath();ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=stroke;ctx.lineWidth=1.5;ctx.stroke();
+  dot(x,y,r*.18,'#0f0a0d');
+}
+function hexagon(x,y,r,angle,fill,stroke){
+  ctx.beginPath();
+  for(let i=0;i<6;i++){
+    const a=angle+i*Math.PI/3;
+    i?ctx.lineTo(x+r*Math.cos(a),y+r*Math.sin(a))
+     :ctx.moveTo(x+r*Math.cos(a),y+r*Math.sin(a));
+  }
+  ctx.closePath();ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=stroke;ctx.lineWidth=1.5;ctx.stroke();
+}
+function block(gx,gy,jx,jy,len){
+  // Rect from ground pivot to beyond joint, oriented along G→J
+  const ang=Math.atan2(jy-gy,jx-gx);
+  ctx.save();ctx.translate(gx,gy);ctx.rotate(ang);
+  ctx.fillStyle='#2a4060';ctx.strokeStyle='#4a75aa';ctx.lineWidth=2;
+  ctx.fillRect(-10,-15,len+20,30);
+  ctx.strokeRect(-10,-15,len+20,30);
+  ctx.restore();
+}
+
+// ── Parameters ────────────────────────────────────────────────────────────────
+// Motor
+const MX=80,MY=390,CR=50;
+
+// Stage 1: crankPin → J1 (A-frame rocker, grounded at G1)
+const G1X=275,G1Y=440,R1=120,CP1=200;
+
+// Stage 2: J1 → J2 (V-rocker, grounded at G2)
+const G2X=475,G2Y=445,R2=120,CP2=220;
+
+// Stage 3: J2 → J3 (rocking block, grounded at G3)
+const G3X=685,G3Y=435,R3=120,CP3=220;
+
+// Branch-tracking state (initial approximate positions)
+let J1={x:270,y:323};
+let J2={x:440,y:330};
+let J3={x:665,y:318};
+let t=0;
+
+// ── Animation ─────────────────────────────────────────────────────────────────
+function frame(){
+  t+=0.021;
+  ctx.clearRect(0,0,W,H);
+
+  // floor
+  ctx.fillStyle='#1a0f14';ctx.fillRect(0,H-25,W,25);
+  ctx.fillStyle='#261520';ctx.fillRect(0,H-28,W,3);
+
+  // crank pin position
+  const cpx=MX+CR*Math.cos(t),cpy=MY+CR*Math.sin(t);
+
+  // ── Solve chain ────────────────────────────────────────────────────────────
+  const s1=cci(cpx,cpy,CP1,G1X,G1Y,R1);  if(s1) J1=pick(s1,J1);
+  const s2=cci(J1.x,J1.y,CP2,G2X,G2Y,R2); if(s2) J2=pick(s2,J2);
+  const s3=cci(J2.x,J2.y,CP3,G3X,G3Y,R3); if(s3) J3=pick(s3,J3);
+
+  // ── Draw back → front ──────────────────────────────────────────────────────
+
+  // Stage 3 rocking block (background)
+  block(G3X,G3Y,J3.x,J3.y,R3);
+
+  // Coupler 3
+  rod(J2.x,J2.y,J3.x,J3.y,7,'#c8a060');
+
+  // Stage 2 V-rocker
+  rod(G2X,G2Y,J2.x,J2.y,11,'#7a4898');
+
+  // Welded perpendicular arm at midpoint of V-rocker (rigidly attached)
+  {
+    const vmx=(G2X+J2.x)/2, vmy=(G2Y+J2.y)/2;
+    const vang=Math.atan2(J2.y-G2Y,J2.x-G2X);
+    const wlen=70, wx=vmx+wlen*Math.cos(vang-Math.PI/2), wy=vmy+wlen*Math.sin(vang-Math.PI/2);
+    rod(vmx,vmy,wx,wy,7,'#48a870');
+    hexagon(wx,wy,16,vang,'#1a5a38','#48a870');
+    dot(vmx,vmy,4,'#48a870');
+  }
+
+  // Coupler 2
+  rod(J1.x,J1.y,J2.x,J2.y,7,'#c8a060');
+
+  // Stage 1 A-rocker (two visual rods = A-frame look)
+  rod(G1X,G1Y,J1.x,J1.y,11,'#a06040');
+  // second leg of A (offset slightly for visual)
+  const mx=(G1X+J1.x)/2+8, my=(G1Y+J1.y)/2+4;
+  rod(G1X+16,G1Y,J1.x,J1.y,6,'#804828');
+
+  // Coupler 1
+  rod(cpx,cpy,J1.x,J1.y,7,'#c8a060');
+
+  // Motor crank arm
+  rod(MX,MY,cpx,cpy,12,'#6b3a4a');
+
+  // Motor flywheel
+  gear(MX,MY,40,15,t,'#f5c518','#b8890a');
+  dot(cpx,cpy,6.5,'#f5c518'); // crank pin (yellow)
+
+  // Ground cross marks
+  cross(G1X,G1Y); cross(G2X,G2Y); cross(G3X,G3Y);
+
+  // Pivot dots
+  dot(G1X,G1Y,6,'#4aa3ff');
+  dot(J1.x,J1.y,5,'#3ddc6a');
+  dot(G2X,G2Y,6,'#4aa3ff');
+  dot(J2.x,J2.y,5,'#3ddc6a');
+  dot(G3X,G3Y,6,'#4aa3ff');
+  dot(J3.x,J3.y,5,'#3ddc6a');
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
