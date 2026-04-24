@@ -1,4 +1,5 @@
 import { useReducer, useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { buildRapierSim } from "./rapierSim.js";
 import {
   MousePointer2, Move, Trash2, Undo2, Redo2, Hammer, Play, Pause,
   Anchor, Link2, Circle as CircleIcon, Info, Music, Waves, Sparkles,
@@ -689,21 +690,138 @@ function buildConstraintMap(parts, joints) {
   return map;
 }
 
-function buildWeldTransforms(parts, joints) {
-  const transforms = [];
-  for (const joint of joints) {
-    if (joint.kind !== "weld") continue;
-    if (joint.partIds.length < 2) continue;
-    const [idA, idB] = joint.partIds;
-    const pA = parts.find(p => p.id === idA);
-    const pB = parts.find(p => p.id === idB);
-    if (!pA || !pB) continue;
-    const relRotDeg = pB.rotation - pA.rotation;
-    const worldOff = { x: pB.x - pA.x, y: pB.y - pA.y };
-    const localOff = rotate(worldOff, -pA.rotation);
-    transforms.push({ partIdA: idA, partIdB: idB, relRotDeg, localOffX: localOff.x, localOffY: localOff.y });
+// Union-find welded parts into clusters. Each cluster has a root part; every
+// other member is frozen to the root via a (localOff, relRot) transform computed
+// from the initial poses. The solver then treats each cluster as a single rigid
+// body, eliminating the per-weld tug-of-war that caused drift in large blobs.
+function buildClusters(parts, joints) {
+  const parent = new Map();
+  for (const p of parts) parent.set(p.id, p.id);
+  const find = (x) => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r);
+    while (parent.get(x) !== r) { const n = parent.get(x); parent.set(x, r); x = n; }
+    return r;
+  };
+  for (const j of joints) {
+    if (j.kind !== "weld" || j.partIds.length < 2) continue;
+    const [a, b] = j.partIds;
+    if (!parent.has(a) || !parent.has(b)) continue;
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
   }
-  return transforms;
+  const groups = new Map();
+  for (const p of parts) {
+    const r = find(p.id);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(p.id);
+  }
+  const rootOf = new Map();
+  const membersOf = new Map();
+  const slaveTransforms = [];
+  for (const [rootId, memberIds] of groups) {
+    const rootPart = parts.find(p => p.id === rootId);
+    if (!rootPart) continue;
+    const ang = -rootPart.rotation * Math.PI / 180;
+    const cosA = Math.cos(ang), sinA = Math.sin(ang);
+    const members = [];
+    for (const mId of memberIds) {
+      rootOf.set(mId, rootId);
+      if (mId === rootId) {
+        members.push({ partId: rootId, localOffX: 0, localOffY: 0, relRotDeg: 0 });
+        continue;
+      }
+      const mPart = parts.find(p => p.id === mId);
+      if (!mPart) continue;
+      const wx = mPart.x - rootPart.x, wy = mPart.y - rootPart.y;
+      const localOffX = wx * cosA - wy * sinA;
+      const localOffY = wx * sinA + wy * cosA;
+      const relRotDeg = mPart.rotation - rootPart.rotation;
+      members.push({ partId: mId, localOffX, localOffY, relRotDeg });
+      slaveTransforms.push({ partIdA: rootId, partIdB: mId, localOffX, localOffY, relRotDeg });
+    }
+    membersOf.set(rootId, members);
+  }
+  return { rootOf, membersOf, slaveTransforms };
+}
+
+// Hole position of a member expressed in its cluster root's local frame.
+function clusterEffectiveLocal(memberPart, memberXform, holeIdx) {
+  const lh = getLocalHoles(memberPart)[holeIdx];
+  if (!lh) return null;
+  const r = rotate(lh, memberXform.relRotDeg);
+  return { x: r.x + memberXform.localOffX, y: r.y + memberXform.localOffY };
+}
+
+// World hole position computed via the cluster root pose.
+function clusterWorldHole(rootPart, effLocal) {
+  if (!effLocal) return { x: rootPart.x, y: rootPart.y };
+  const r = rotate(effLocal, rootPart.rotation);
+  return { x: rootPart.x + r.x, y: rootPart.y + r.y };
+}
+
+function memberXformOf(clusters, partId) {
+  const rId = clusters.rootOf.get(partId);
+  if (rId == null) return null;
+  const ms = clusters.membersOf.get(rId);
+  return ms ? ms.find(m => m.partId === partId) : null;
+}
+
+function memberEffLocal(clusters, parts, partId, holeIdx) {
+  const member = parts.find(p => p.id === partId);
+  const xf = memberXformOf(clusters, partId);
+  if (!member || !xf) return null;
+  return clusterEffectiveLocal(member, xf, holeIdx);
+}
+
+function memberWorldHole(clusters, parts, partId, holeIdx) {
+  const rId = clusters.rootOf.get(partId);
+  const root = parts.find(p => p.id === rId);
+  const eff = memberEffLocal(clusters, parts, partId, holeIdx);
+  if (!root || !eff) return simWorldHole(parts.find(p => p.id === partId), holeIdx);
+  return clusterWorldHole(root, eff);
+}
+
+// Angular-impulse constraint with a precomputed local (root-frame) offset.
+function applyPositionConstraintLocal(part, effLocal, targetX, targetY) {
+  if (!effLocal) return part;
+  const r = rotate(effLocal, part.rotation);
+  const ex = targetX - (part.x + r.x);
+  const ey = targetY - (part.y + r.y);
+  if (Math.abs(ex) < 1e-9 && Math.abs(ey) < 1e-9) return part;
+  const rSq = r.x * r.x + r.y * r.y;
+  const dθRad = rSq > 0.001 ? (r.x * ey - r.y * ex) / rSq : 0;
+  const newRotDeg = part.rotation + dθRad * 180 / Math.PI;
+  const newR = rotate(effLocal, newRotDeg);
+  return { ...part, rotation: newRotDeg, x: targetX - newR.x, y: targetY - newR.y };
+}
+
+// Two-point exact solve (ground anchor + pivot target) using local offsets.
+function solveGroundedPartLocal(part, gLocal, groundX, groundY, pLocal, pivotTX, pivotTY) {
+  if (!gLocal || !pLocal) return part;
+  const dLocal = { x: pLocal.x - gLocal.x, y: pLocal.y - gLocal.y };
+  if (Math.hypot(dLocal.x, dLocal.y) < 0.01) return part;
+  const dWorld = { x: pivotTX - groundX, y: pivotTY - groundY };
+  const newRotRad = Math.atan2(dWorld.y, dWorld.x) - Math.atan2(dLocal.y, dLocal.x);
+  const newRotDeg = newRotRad * 180 / Math.PI;
+  const rG = rotate(gLocal, newRotDeg);
+  return { ...part, rotation: newRotDeg, x: groundX - rG.x, y: groundY - rG.y };
+}
+
+// Re-slave every non-root cluster member from its root's current pose.
+function slaveClusterMembers(parts, clusters) {
+  for (const [rootId, members] of clusters.membersOf) {
+    const rIdx = parts.findIndex(p => p.id === rootId);
+    if (rIdx < 0) continue;
+    const root = parts[rIdx];
+    for (const m of members) {
+      if (m.partId === rootId) continue;
+      const mIdx = parts.findIndex(p => p.id === m.partId);
+      if (mIdx < 0) continue;
+      const off = rotate({ x: m.localOffX, y: m.localOffY }, root.rotation);
+      parts[mIdx] = { ...parts[mIdx], x: root.x + off.x, y: root.y + off.y, rotation: root.rotation + m.relRotDeg };
+    }
+  }
 }
 
 function simWorldHole(part, holeIdx) {
@@ -750,103 +868,108 @@ function circleCircleIntersect(ax, ay, ra, bx, by, rb) {
 
 // General kinematic solver: walks motor-driven chains of arbitrary depth,
 // then cascades through solved grounded intermediates to propagate further.
-function solveKinematicChains(parts, joints, constraintMap, groundByPart) {
+function solveKinematicChains(parts, joints, constraintMap, groundByRoot, fullyFixedRoots, clusters) {
+  const solvedRoots = new Set();
   const solvedIds = new Set();
 
-  const localLen = (part, hA, hB) => {
-    const hl = getLocalHoles(part);
-    return Math.hypot(hl[hA].x - hl[hB].x, hl[hA].y - hl[hB].y);
-  };
-  const closest = (sols, ref) => {
+  const closestTo = (sols, ref) => {
+    if (!ref) return sols[0];
     const d0 = Math.hypot(sols[0].x - ref.x, sols[0].y - ref.y);
     const d1 = Math.hypot(sols[1].x - ref.x, sols[1].y - ref.y);
     return d0 <= d1 ? sols[0] : sols[1];
   };
 
-  // Index: partId → all non-ground pivot joints containing that part
-  const pjByPart = new Map();
+  // Enrich every non-ground joint entry with its cluster root and root-local hole.
+  // Joints entirely internal to a single cluster are skipped (the weld is the constraint).
+  const pivotsByRoot = new Map();
   for (const j of joints) {
     if (j.kind === "ground") continue;
     const cm = constraintMap.get(j.id);
-    if (!cm) continue;
-    for (const e of cm) {
-      if (!pjByPart.has(e.partId)) pjByPart.set(e.partId, []);
-      pjByPart.get(e.partId).push({ joint: j, entry: e });
+    if (!cm || cm.length < 2) continue;
+    const enriched = cm.map(e => {
+      const rId = clusters.rootOf.get(e.partId);
+      if (rId == null) return null;
+      const effLocal = memberEffLocal(clusters, parts, e.partId, e.holeIdx);
+      return effLocal ? { ...e, rootId: rId, effLocal } : null;
+    });
+    if (enriched.some(x => x === null)) continue;
+    const uniqueRoots = new Set(enriched.map(x => x.rootId));
+    if (uniqueRoots.size < 2) continue; // internal to a cluster
+    for (const en of enriched) {
+      if (!pivotsByRoot.has(en.rootId)) pivotsByRoot.set(en.rootId, []);
+      pivotsByRoot.get(en.rootId).push({ joint: j, ownEntry: en, enriched });
     }
   }
 
-  // Parts with >1 ground joint are fully fixed — kinematic solver must not move them
-  const groundCount = new Map();
-  for (const j of joints) {
-    if (j.kind !== "ground") continue;
-    const cm = constraintMap.get(j.id);
-    if (!cm) continue;
-    for (const e of cm) groundCount.set(e.partId, (groundCount.get(e.partId) || 0) + 1);
-  }
-  const fullyFixed = new Set([...groundCount.entries()].filter(([, c]) => c > 1).map(([id]) => id));
+  const commitRoot = (rootId) => {
+    if (solvedRoots.has(rootId)) return;
+    solvedRoots.add(rootId);
+    for (const m of clusters.membersOf.get(rootId) || []) solvedIds.add(m.partId);
+  };
 
-  // Walk and solve a linear chain starting at (startPartId, inHoleIdx) driven from position A.
-  // Stops when it reaches a grounded terminal. visitedIds prevents cycles.
-  function trySolveChain(startPartId, inHoleIdx, A, visitedIds) {
-    const chain = []; // [{ part, inHoleIdx, outHoleIdx }]
-    let curId = startPartId;
-    let curInHole = inHoleIdx;
-    const visited = new Set(visitedIds);
-    visited.add(curId);
+  const sameLocal = (a, b) =>
+    a && b && Math.abs(a.x - b.x) < 1e-3 && Math.abs(a.y - b.y) < 1e-3;
 
-    for (let depth = 0; depth < 8; depth++) {
-      const cur = parts.find(p => p.id === curId);
-      if (!cur) break;
+  // Walk a chain of cluster roots from (startRootId, inEffLocal) driven by world point A.
+  // Stops at a grounded (but not fully-fixed) terminal.
+  function trySolveChain(startRootId, startInLocal, A, visitedRoots) {
+    const chain = []; // [{ rootId, inEffLocal, outEffLocal, terminal?, gx?, gy? }]
+    let curRoot = startRootId;
+    let curInLocal = startInLocal;
+    const visited = new Set(visitedRoots);
+    visited.add(curRoot);
 
-      if (groundByPart.has(curId)) {
-        if (fullyFixed.has(curId)) break; // over-constrained, abort — PBD handles it
-        chain.push({ part: cur, inHoleIdx: curInHole, outHoleIdx: groundByPart.get(curId).holeIdx });
+    for (let depth = 0; depth < 12; depth++) {
+      if (groundByRoot.has(curRoot)) {
+        if (fullyFixedRoots.has(curRoot)) return false;
+        const g = groundByRoot.get(curRoot);
+        chain.push({ rootId: curRoot, inEffLocal: curInLocal, outEffLocal: g.effLocal, terminal: true, gx: g.x, gy: g.y });
         break;
       }
-
-      // Find first valid outgoing pivot joint from this part (not the incoming hole)
-      let moved = false;
-      for (const { joint: pj, entry: pe } of (pjByPart.get(curId) || [])) {
-        if (pe.holeIdx === curInHole) continue;
-        const cm2 = constraintMap.get(pj.id);
-        if (!cm2) continue;
-        const next = cm2.find(e => e.partId !== curId);
-        if (!next || visited.has(next.partId)) continue;
-        chain.push({ part: cur, inHoleIdx: curInHole, outHoleIdx: pe.holeIdx });
-        visited.add(next.partId);
-        curId = next.partId;
-        curInHole = next.holeIdx;
-        moved = true;
+      let advanced = false;
+      for (const { ownEntry, enriched } of (pivotsByRoot.get(curRoot) || [])) {
+        if (sameLocal(ownEntry.effLocal, curInLocal)) continue;
+        const other = enriched.find(x => x.rootId !== curRoot && !visited.has(x.rootId));
+        if (!other) continue;
+        chain.push({ rootId: curRoot, inEffLocal: curInLocal, outEffLocal: ownEntry.effLocal });
+        visited.add(other.rootId);
+        curRoot = other.rootId;
+        curInLocal = other.effLocal;
+        advanced = true;
         break;
       }
-      if (!moved) break;
+      if (!advanced) break;
     }
 
     const n = chain.length;
-    if (n === 0 || !groundByPart.has(chain[n - 1].part.id)) return false;
+    if (n === 0 || !chain[n - 1].terminal) return false;
 
-    const gEntry = groundByPart.get(chain[n - 1].part.id);
-    const G = { x: gEntry.x, y: gEntry.y };
-    const L = chain.map(cp => localLen(cp.part, cp.inHoleIdx, cp.outHoleIdx));
-    // K[i] = free pivot between link i and link i+1 (i = 0..n-2)
-    const K = chain.slice(0, n - 1).map(cp => simWorldHole(cp.part, cp.outHoleIdx));
+    const G = { x: chain[n - 1].gx, y: chain[n - 1].gy };
+    // Link length = distance between inEffLocal and outEffLocal in cluster root-local frame
+    // (equals world distance because it's a rigid-body metric).
+    const L = chain.map(cp => {
+      if (!cp.inEffLocal) return 0; // only possible for link 0 if driving point coincides with root origin
+      return Math.hypot(cp.outEffLocal.x - cp.inEffLocal.x, cp.outEffLocal.y - cp.inEffLocal.y);
+    });
+    const K = [];
+    for (let i = 0; i < n - 1; i++) {
+      const rp = parts.find(p => p.id === chain[i].rootId);
+      K.push(clusterWorldHole(rp, chain[i].outEffLocal));
+    }
 
     if (n === 1) {
-      // Driving point A directly orients a grounded terminal — one-shot
-      const idx = parts.findIndex(p => p.id === chain[0].part.id);
+      const idx = parts.findIndex(p => p.id === chain[0].rootId);
       if (idx < 0) return false;
-      parts[idx] = solveGroundedPart(chain[0].part, chain[0].outHoleIdx, G.x, G.y, chain[0].inHoleIdx, A.x, A.y);
-      solvedIds.add(chain[0].part.id);
+      parts[idx] = solveGroundedPartLocal(parts[idx], chain[0].outEffLocal, G.x, G.y, chain[0].inEffLocal, A.x, A.y);
+      commitRoot(chain[0].rootId);
       return true;
     }
 
     if (n === 2) {
-      // Direct cci — one-shot, no iteration needed
       const sols = circleCircleIntersect(A.x, A.y, L[0], G.x, G.y, L[1]);
       if (!sols) return false;
-      K[0] = closest(sols, K[0]);
+      K[0] = closestTo(sols, K[0]);
     } else {
-      // Gauss-Seidel for n ≥ 3 links
       let ok = true;
       for (let it = 0; it < 24; it++) {
         for (let i = 0; i < n - 1; i++) {
@@ -854,60 +977,56 @@ function solveKinematicChains(parts, joints, constraintMap, groundByPart) {
           const next = i === n - 2 ? G : K[i + 1];
           const sols = circleCircleIntersect(prev.x, prev.y, L[i], next.x, next.y, L[i + 1]);
           if (!sols) { ok = false; break; }
-          K[i] = closest(sols, K[i]);
+          K[i] = closestTo(sols, K[i]);
         }
         if (!ok) break;
       }
       if (!ok) return false;
     }
 
-    // Apply solved pivot positions to all parts
-    const pivots = [A, ...K, G]; // n+1 boundary points
+    const pivots = [A, ...K, G];
     for (let i = 0; i < n; i++) {
       const cp = chain[i];
-      const idx = parts.findIndex(p => p.id === cp.part.id);
+      const idx = parts.findIndex(p => p.id === cp.rootId);
       if (idx < 0) continue;
       const pIn = pivots[i], pOut = pivots[i + 1];
       parts[idx] = i < n - 1
-        ? solveGroundedPart(cp.part, cp.inHoleIdx, pIn.x, pIn.y, cp.outHoleIdx, pOut.x, pOut.y)
-        : solveGroundedPart(cp.part, cp.outHoleIdx, G.x, G.y, cp.inHoleIdx, pIn.x, pIn.y);
-      solvedIds.add(cp.part.id);
+        ? solveGroundedPartLocal(parts[idx], cp.inEffLocal, pIn.x, pIn.y, cp.outEffLocal, pOut.x, pOut.y)
+        : solveGroundedPartLocal(parts[idx], cp.outEffLocal, G.x, G.y, cp.inEffLocal, pIn.x, pIn.y);
+      commitRoot(cp.rootId);
     }
     return true;
   }
 
-  // Phase 1: solve chains driven directly by motors
+  // Phase 1: chains driven directly by motors. A motor is always its own cluster.
   for (const motorPart of parts) {
     if (motorPart.type !== "motor") continue;
-    for (const { entry: me, joint: mj } of (pjByPart.get(motorPart.id) || [])) {
-      const cm0 = constraintMap.get(mj.id);
-      if (!cm0 || cm0.length < 2) continue;
-      const crankE = cm0.find(e => e.partId !== motorPart.id);
-      if (!crankE) continue;
-      const A = simWorldHole(motorPart, me.holeIdx);
-      trySolveChain(crankE.partId, crankE.holeIdx, A, [motorPart.id]);
+    const motorRoot = clusters.rootOf.get(motorPart.id);
+    for (const { ownEntry, enriched } of (pivotsByRoot.get(motorRoot) || [])) {
+      const other = enriched.find(x => x.rootId !== motorRoot);
+      if (!other) continue;
+      const A = simWorldHole(motorPart, ownEntry.holeIdx);
+      trySolveChain(other.rootId, other.effLocal, A, [motorRoot]);
     }
   }
 
-  // Phase 2: cascade — solved grounded parts drive further downstream chains
+  // Phase 2: cascade from solved grounded roots.
   let changed = true;
   while (changed) {
     changed = false;
-    for (const partId of [...solvedIds]) {
-      if (!groundByPart.has(partId) || fullyFixed.has(partId)) continue;
-      const solved = parts.find(p => p.id === partId);
-      if (!solved) continue;
-      const gHole = groundByPart.get(partId).holeIdx;
-      for (const { joint: pj, entry: pe } of (pjByPart.get(partId) || [])) {
-        if (pe.holeIdx === gHole) continue; // ignore the ground-pin hole
-        const cm2 = constraintMap.get(pj.id);
-        if (!cm2) continue;
-        const next = cm2.find(e => e.partId !== partId);
-        if (!next || solvedIds.has(next.partId)) continue;
-        const A = simWorldHole(solved, pe.holeIdx);
-        const before = solvedIds.size;
-        trySolveChain(next.partId, next.holeIdx, A, [partId]);
-        if (solvedIds.size > before) changed = true;
+    for (const rId of [...solvedRoots]) {
+      if (!groundByRoot.has(rId) || fullyFixedRoots.has(rId)) continue;
+      const rootPart = parts.find(p => p.id === rId);
+      if (!rootPart) continue;
+      const g = groundByRoot.get(rId);
+      for (const { ownEntry, enriched } of (pivotsByRoot.get(rId) || [])) {
+        if (sameLocal(ownEntry.effLocal, g.effLocal)) continue;
+        const other = enriched.find(x => x.rootId !== rId && !solvedRoots.has(x.rootId));
+        if (!other) continue;
+        const A = clusterWorldHole(rootPart, ownEntry.effLocal);
+        const before = solvedRoots.size;
+        trySolveChain(other.rootId, other.effLocal, A, [rId]);
+        if (solvedRoots.size > before) changed = true;
       }
     }
   }
@@ -932,75 +1051,89 @@ function solveGroundedPart(part, groundHoleIdx, groundX, groundY, pivotHoleIdx, 
   return { ...part, rotation: newRotDeg, x: groundX - rG.x, y: groundY - rG.y };
 }
 
-function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
+function stepSimulation(simParts, joints, constraintMap, clusters, dt) {
   const parts = simParts.map(p => ({ ...p }));
 
-  // Pre-build ground lookup: partId → last {holeIdx, x, y} (for kinematic solver)
-  // Also build groundsByPart: partId → ALL [{holeIdx, x, y}] (for fully-fixed snapping)
-  const groundByPart = new Map();
-  const groundsByPart = new Map();
+  // Ground index, now keyed by cluster root. Each ground remembers which member-hole it pins.
+  const groundByRoot = new Map();
+  const groundsByRoot = new Map();
   for (const joint of joints) {
     if (joint.kind !== "ground") continue;
     const cm = constraintMap.get(joint.id);
     if (!cm) continue;
     for (const entry of cm) {
-      groundByPart.set(entry.partId, { holeIdx: entry.holeIdx, x: joint.x, y: joint.y });
-      if (!groundsByPart.has(entry.partId)) groundsByPart.set(entry.partId, []);
-      groundsByPart.get(entry.partId).push({ holeIdx: entry.holeIdx, x: joint.x, y: joint.y });
+      const rId = clusters.rootOf.get(entry.partId);
+      if (rId == null) continue;
+      const effLocal = memberEffLocal(clusters, parts, entry.partId, entry.holeIdx);
+      if (!effLocal) continue;
+      const g = { x: joint.x, y: joint.y, effLocal, memberPartId: entry.partId, holeIdx: entry.holeIdx };
+      groundByRoot.set(rId, g);
+      if (!groundsByRoot.has(rId)) groundsByRoot.set(rId, []);
+      groundsByRoot.get(rId).push(g);
     }
   }
 
-  // Parts with 2+ ground joints are fully fixed — solve both position AND rotation
-  const fullyFixed2 = new Set(
-    [...groundsByPart.entries()].filter(([, gs]) => gs.length > 1).map(([id]) => id)
-  );
-  const snapFullyFixed = () => {
-    for (const partId of fullyFixed2) {
-      const gs = groundsByPart.get(partId);
-      if (!gs || gs.length < 2) continue;
-      const idx = parts.findIndex(p => p.id === partId);
-      if (idx < 0) continue;
-      parts[idx] = solveGroundedPart(parts[idx], gs[0].holeIdx, gs[0].x, gs[0].y, gs[1].holeIdx, gs[1].x, gs[1].y);
+  // Cluster is fully fixed if ≥2 of its grounds anchor distinct world points.
+  const fullyFixedRoots = new Set();
+  for (const [rId, gs] of groundsByRoot) {
+    if (gs.length < 2) continue;
+    outer: for (let i = 0; i < gs.length; i++) {
+      for (let j = i + 1; j < gs.length; j++) {
+        if (Math.hypot(gs[i].x - gs[j].x, gs[i].y - gs[j].y) > 0.01) {
+          fullyFixedRoots.add(rId);
+          break outer;
+        }
+      }
     }
+  }
+
+  const snapFullyFixed = () => {
+    for (const rId of fullyFixedRoots) {
+      const gs = groundsByRoot.get(rId);
+      if (!gs || gs.length < 2) continue;
+      const idx = parts.findIndex(p => p.id === rId);
+      if (idx < 0) continue;
+      parts[idx] = solveGroundedPartLocal(parts[idx], gs[0].effLocal, gs[0].x, gs[0].y, gs[1].effLocal, gs[1].x, gs[1].y);
+    }
+    slaveClusterMembers(parts, clusters);
   };
   snapFullyFixed();
 
-  // Sort joints so motor-connected pivots run first each iteration,
-  // ensuring downstream constraints always see fresh motor-driven positions.
+  // Order joints so motor-adjacent ones run first each iteration.
   const sortedJoints = [...joints].sort((a, b) => {
-    const motorConnected = (j) => j.kind !== "ground" && j.partIds.some(id => {
+    const motorAdjacent = (j) => j.kind !== "ground" && j.partIds.some(id => {
       const p = parts.find(q => q.id === id);
       return p?.type === "motor";
     });
-    const aMotor = motorConnected(a);
-    const bMotor = motorConnected(b);
-    if (aMotor && !bMotor) return -1;
-    if (!aMotor && bMotor) return 1;
-    // grounds last
+    const am = motorAdjacent(a), bm = motorAdjacent(b);
+    if (am && !bm) return -1;
+    if (!am && bm) return 1;
     if (a.kind === "ground" && b.kind !== "ground") return 1;
     if (a.kind !== "ground" && b.kind === "ground") return -1;
     return 0;
   });
 
-  // Step 1: Advance motors
+  // Step 1: Advance motors around their own ground/anchor.
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     if (part.type !== "motor") continue;
     const motorSpeed = (part.speed ?? MOTOR_SPEED_DEG) * (part.direction ?? 1);
     const newRot = part.rotation + motorSpeed * dt;
-    const g = groundByPart.get(part.id);
+    const motorRoot = clusters.rootOf.get(part.id);
+    const g = groundByRoot.get(motorRoot);
     let pivotX = part.x, pivotY = part.y, pivotHoleIdx = 0;
-    if (g) { pivotX = g.x; pivotY = g.y; pivotHoleIdx = g.holeIdx; }
+    if (g && g.memberPartId === part.id) { pivotX = g.x; pivotY = g.y; pivotHoleIdx = g.holeIdx; }
     const lh = getLocalHoles(part)[pivotHoleIdx] ?? { x: 0, y: 0 };
     const r = rotate(lh, newRot);
     parts[i] = { ...part, rotation: newRot, x: pivotX - r.x, y: pivotY - r.y };
   }
 
-  // Step 1b: Exact kinematic solve for motor→free→grounded chains — no drift, no iteration
-  const kinematicallySolvedIds = solveKinematicChains(parts, joints, constraintMap, groundByPart);
+  // Step 1b: Exact analytical solve through cluster chains (motor → grounded terminals).
+  const kinematicallySolvedIds = solveKinematicChains(parts, joints, constraintMap, groundByRoot, fullyFixedRoots, clusters);
+  slaveClusterMembers(parts, clusters);
 
-  // Parts directly connected to a motor (the cranks): treated as authoritative in PBD
-  const motorConnectedIds = new Set();
+  // Cluster roots that PBD must not move.
+  const motorConnectedRoots = new Set();
   for (const j of joints) {
     if (j.kind === "ground") continue;
     const cm = constraintMap.get(j.id);
@@ -1008,14 +1141,22 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
     const hasMotor = cm.some(e => parts.find(p => p.id === e.partId)?.type === "motor");
     if (hasMotor) {
       for (const e of cm) {
-        if (parts.find(p => p.id === e.partId)?.type !== "motor") motorConnectedIds.add(e.partId);
+        const part = parts.find(p => p.id === e.partId);
+        if (part?.type === "motor") continue;
+        const rId = clusters.rootOf.get(e.partId);
+        if (rId != null) motorConnectedRoots.add(rId);
       }
     }
   }
-  // Parts solved analytically are also authoritative — PBD must not override them
-  for (const id of kinematicallySolvedIds) motorConnectedIds.add(id);
+  for (const id of kinematicallySolvedIds) {
+    const rId = clusters.rootOf.get(id);
+    if (rId != null) motorConnectedRoots.add(rId);
+  }
 
-  // Step 2: Constraint iterations
+  const rootOf = (id) => clusters.rootOf.get(id);
+  const rootIdxOf = (id) => parts.findIndex(p => p.id === rootOf(id));
+
+  // Step 2: PBD constraint iterations on cluster roots.
   for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
     for (const joint of sortedJoints) {
       const cm = constraintMap.get(joint.id);
@@ -1023,169 +1164,163 @@ function stepSimulation(simParts, joints, constraintMap, weldTransforms, dt) {
 
       if (joint.kind === "ground") {
         const entry = cm[0];
-        if (fullyFixed2.has(entry.partId)) continue; // handled by snapFullyFixed
-        const idx = parts.findIndex(p => p.id === entry.partId);
-        if (idx < 0 || parts[idx].type === "motor") continue;
-        const p = parts[idx];
-        const lh = getLocalHoles(p)[entry.holeIdx];
-        if (!lh) continue;
-        const r = rotate(lh, p.rotation);
-        parts[idx] = { ...p, x: joint.x - r.x, y: joint.y - r.y };
+        const rId = rootOf(entry.partId);
+        if (rId == null) continue;
+        if (fullyFixedRoots.has(rId)) continue;
+        if (motorConnectedRoots.has(rId)) continue;
+        const rIdx = parts.findIndex(p => p.id === rId);
+        if (rIdx < 0 || parts[rIdx].type === "motor") continue;
+        const effLocal = memberEffLocal(clusters, parts, entry.partId, entry.holeIdx);
+        if (!effLocal) continue;
+        const r = rotate(effLocal, parts[rIdx].rotation);
+        parts[rIdx] = { ...parts[rIdx], x: joint.x - r.x, y: joint.y - r.y };
 
       } else if (cm.length >= 2) {
         const [entA, entB] = cm;
-        const idxA = parts.findIndex(p => p.id === entA.partId);
-        const idxB = parts.findIndex(p => p.id === entB.partId);
-        if (idxA < 0 || idxB < 0) continue;
+        const rA = rootOf(entA.partId), rB = rootOf(entB.partId);
+        if (rA == null || rB == null) continue;
+        if (rA === rB) continue; // internal to one cluster — weld handles it
+        const rIdxA = parts.findIndex(p => p.id === rA);
+        const rIdxB = parts.findIndex(p => p.id === rB);
+        if (rIdxA < 0 || rIdxB < 0) continue;
 
-        const aFixed = parts[idxA].type === "motor";
-        const bFixed = parts[idxB].type === "motor";
-        if (aFixed && bFixed) continue;
+        const aMotor = parts[rIdxA].type === "motor";
+        const bMotor = parts[rIdxB].type === "motor";
+        if (aMotor && bMotor) continue;
 
+        const effA = memberEffLocal(clusters, parts, entA.partId, entA.holeIdx);
+        const effB = memberEffLocal(clusters, parts, entB.partId, entB.holeIdx);
+        if (!effA || !effB) continue;
+
+        // Slots only supported when the slot strip is its own singleton cluster.
         if (entA.isSlot || entB.isSlot) {
-          // Line (prismatic) constraint: the other part's hole slides along the slot strip's axis
-          const [slotEntry, slotIdx, otherEntry, otherIdx] = entA.isSlot
-            ? [entA, idxA, entB, idxB]
-            : [entB, idxB, entA, idxA];
-          const S = parts[slotIdx];
+          const [slotEntry, slotIdxP, otherEntry, otherIdxP, slotRoot, otherRoot] = entA.isSlot
+            ? [entA, parts.findIndex(p => p.id === entA.partId), entB, parts.findIndex(p => p.id === entB.partId), rA, rB]
+            : [entB, parts.findIndex(p => p.id === entB.partId), entA, parts.findIndex(p => p.id === entA.partId), rB, rA];
+          if (slotIdxP < 0 || otherIdxP < 0) continue;
+          if (slotEntry.partId !== slotRoot) continue; // slot in a welded cluster: skip gracefully
+          const S = parts[slotIdxP];
           const θr = S.rotation * Math.PI / 180;
           const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
-          const whOther = simWorldHole(parts[otherIdx], otherEntry.holeIdx);
+          const whOther = memberWorldHole(clusters, parts, otherEntry.partId, otherEntry.holeIdx);
           const relX = whOther.x - S.x, relY = whOther.y - S.y;
           const s = relX * cosθ + relY * sinθ;
           const e = -relX * sinθ + relY * cosθ;
-          const projX = S.x + s * cosθ, projY = S.y + s * sinθ;
-          const sFixed = S.type === "motor" || fullyFixed2.has(slotEntry.partId);
+          const sFixed = S.type === "motor" || fullyFixedRoots.has(slotRoot) || motorConnectedRoots.has(slotRoot);
           if (!sFixed) {
-            if (groundByPart.has(slotEntry.partId)) {
-              // Single-ground slotted strip: rotate around the ground anchor to align slot with pin
-              const gS = groundByPart.get(slotEntry.partId);
+            if (groundByRoot.has(slotRoot)) {
+              const gS = groundByRoot.get(slotRoot);
               const gLH = getLocalHoles(S)[gS.holeIdx];
               const dLen = Math.hypot(whOther.x - gS.x, whOther.y - gS.y);
               if (gLH && dLen > 0.01) {
-                // s is along-axis position from hole 0; gLH.x is ground hole's local x
                 const newRotRad = Math.atan2(whOther.y - gS.y, whOther.x - gS.x) + (s < gLH.x ? Math.PI : 0);
                 const newRotDeg = newRotRad * 180 / Math.PI;
                 const rG = rotate(gLH, newRotDeg);
-                parts[slotIdx] = { ...S, rotation: newRotDeg, x: gS.x - rG.x, y: gS.y - rG.y };
+                parts[slotIdxP] = { ...S, rotation: newRotDeg, x: gS.x - rG.x, y: gS.y - rG.y };
               }
             } else {
-              parts[slotIdx] = { ...S, x: S.x - e * sinθ, y: S.y + e * cosθ };
+              parts[slotIdxP] = { ...S, x: S.x - e * sinθ, y: S.y + e * cosθ };
             }
           }
-          // Recompute projection with possibly-updated slot strip
-          const S2 = parts[slotIdx];
+          const S2 = parts[slotIdxP];
           const θr2 = S2.rotation * Math.PI / 180;
           const cosθ2 = Math.cos(θr2), sinθ2 = Math.sin(θr2);
           const relX2 = whOther.x - S2.x, relY2 = whOther.y - S2.y;
           const s2 = relX2 * cosθ2 + relY2 * sinθ2;
           const projX2 = S2.x + s2 * cosθ2, projY2 = S2.y + s2 * sinθ2;
-          if (parts[otherIdx].type !== "motor") {
-            const gOther = groundByPart.get(otherEntry.partId);
-            parts[otherIdx] = gOther
-              ? solveGroundedPart(parts[otherIdx], gOther.holeIdx, gOther.x, gOther.y, otherEntry.holeIdx, projX2, projY2)
-              : applyPositionConstraint(parts[otherIdx], otherEntry.holeIdx, projX2, projY2);
+          if (parts[rootIdxOf(otherEntry.partId)].type !== "motor" && !motorConnectedRoots.has(otherRoot)) {
+            const oRIdx = rootIdxOf(otherEntry.partId);
+            const gO = groundByRoot.get(otherRoot);
+            const effO = memberEffLocal(clusters, parts, otherEntry.partId, otherEntry.holeIdx);
+            parts[oRIdx] = gO
+              ? solveGroundedPartLocal(parts[oRIdx], gO.effLocal, gO.x, gO.y, effO, projX2, projY2)
+              : applyPositionConstraintLocal(parts[oRIdx], effO, projX2, projY2);
           }
         } else {
-          const whA = simWorldHole(parts[idxA], entA.holeIdx);
-          const whB = simWorldHole(parts[idxB], entB.holeIdx);
-          const aGrounded = groundByPart.has(entA.partId);
-          const bGrounded = groundByPart.has(entB.partId);
-          const gA = groundByPart.get(entA.partId);
-          const gB = groundByPart.get(entB.partId);
+          const whA = clusterWorldHole(parts[rIdxA], effA);
+          const whB = clusterWorldHole(parts[rIdxB], effB);
+          const aGrounded = groundByRoot.has(rA);
+          const bGrounded = groundByRoot.has(rB);
+          const gA = groundByRoot.get(rA);
+          const gB = groundByRoot.get(rB);
 
-          if (aFixed) {
-            // Motor drives A: pull B toward A's hole — skip if B was analytically solved this frame
-            if (!motorConnectedIds.has(entB.partId)) {
-              parts[idxB] = gB
-                ? solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, whA.x, whA.y)
-                : applyPositionConstraint(parts[idxB], entB.holeIdx, whA.x, whA.y);
+          if (aMotor) {
+            if (!motorConnectedRoots.has(rB)) {
+              parts[rIdxB] = gB
+                ? solveGroundedPartLocal(parts[rIdxB], gB.effLocal, gB.x, gB.y, effB, whA.x, whA.y)
+                : applyPositionConstraintLocal(parts[rIdxB], effB, whA.x, whA.y);
             }
-          } else if (bFixed) {
-            // Motor drives B: pull A toward B's hole — skip if A was analytically solved this frame
-            if (!motorConnectedIds.has(entA.partId)) {
-              parts[idxA] = gA
-                ? solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y)
-                : applyPositionConstraint(parts[idxA], entA.holeIdx, whB.x, whB.y);
+          } else if (bMotor) {
+            if (!motorConnectedRoots.has(rA)) {
+              parts[rIdxA] = gA
+                ? solveGroundedPartLocal(parts[rIdxA], gA.effLocal, gA.x, gA.y, effA, whB.x, whB.y)
+                : applyPositionConstraintLocal(parts[rIdxA], effA, whB.x, whB.y);
             }
           } else if (bGrounded && !aGrounded) {
-            // If B was analytically solved, don't re-rotate it — just pull A toward B's current hole.
-            if (!motorConnectedIds.has(entB.partId)) {
-              parts[idxB] = solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, whA.x, whA.y);
+            if (!motorConnectedRoots.has(rB)) {
+              parts[rIdxB] = solveGroundedPartLocal(parts[rIdxB], gB.effLocal, gB.x, gB.y, effB, whA.x, whA.y);
             }
-            if (!motorConnectedIds.has(entA.partId)) {
-              const newWhB = simWorldHole(parts[idxB], entB.holeIdx);
-              parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, newWhB.x, newWhB.y);
+            if (!motorConnectedRoots.has(rA)) {
+              const newWhB = clusterWorldHole(parts[rIdxB], effB);
+              parts[rIdxA] = applyPositionConstraintLocal(parts[rIdxA], effA, newWhB.x, newWhB.y);
             }
           } else if (aGrounded && !bGrounded) {
-            // If A was analytically solved, don't re-rotate it — just pull B toward A's current hole.
-            if (!motorConnectedIds.has(entA.partId)) {
-              parts[idxA] = solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, whB.x, whB.y);
+            if (!motorConnectedRoots.has(rA)) {
+              parts[rIdxA] = solveGroundedPartLocal(parts[rIdxA], gA.effLocal, gA.x, gA.y, effA, whB.x, whB.y);
             }
-            if (!motorConnectedIds.has(entB.partId)) {
-              const newWhA = simWorldHole(parts[idxA], entA.holeIdx);
-              parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, newWhA.x, newWhA.y);
+            if (!motorConnectedRoots.has(rB)) {
+              const newWhA = clusterWorldHole(parts[rIdxA], effA);
+              parts[rIdxB] = applyPositionConstraintLocal(parts[rIdxB], effB, newWhA.x, newWhA.y);
             }
           } else if (aGrounded && bGrounded) {
-            // Both parts grounded — exact circle-circle intersection
-            const locsA = getLocalHoles(parts[idxA]);
-            const locsB = getLocalHoles(parts[idxB]);
-            const rA = Math.hypot(locsA[entA.holeIdx].x - locsA[gA.holeIdx].x, locsA[entA.holeIdx].y - locsA[gA.holeIdx].y);
-            const rB = Math.hypot(locsB[entB.holeIdx].x - locsB[gB.holeIdx].x, locsB[entB.holeIdx].y - locsB[gB.holeIdx].y);
-            const sols = circleCircleIntersect(gA.x, gA.y, rA, gB.x, gB.y, rB);
+            const radA = Math.hypot(effA.x - gA.effLocal.x, effA.y - gA.effLocal.y);
+            const radB = Math.hypot(effB.x - gB.effLocal.x, effB.y - gB.effLocal.y);
+            const sols = circleCircleIntersect(gA.x, gA.y, radA, gB.x, gB.y, radB);
             if (sols) {
               const d0 = Math.hypot(sols[0].x - whA.x, sols[0].y - whA.y);
               const d1 = Math.hypot(sols[1].x - whA.x, sols[1].y - whA.y);
               const tgt = d0 <= d1 ? sols[0] : sols[1];
-              parts[idxA] = solveGroundedPart(parts[idxA], gA.holeIdx, gA.x, gA.y, entA.holeIdx, tgt.x, tgt.y);
-              parts[idxB] = solveGroundedPart(parts[idxB], gB.holeIdx, gB.x, gB.y, entB.holeIdx, tgt.x, tgt.y);
+              if (!motorConnectedRoots.has(rA)) parts[rIdxA] = solveGroundedPartLocal(parts[rIdxA], gA.effLocal, gA.x, gA.y, effA, tgt.x, tgt.y);
+              if (!motorConnectedRoots.has(rB)) parts[rIdxB] = solveGroundedPartLocal(parts[rIdxB], gB.effLocal, gB.x, gB.y, effB, tgt.x, tgt.y);
             }
           } else {
-            // Both free: motor-connected part is authoritative — other follows it exactly
-            const aMC = motorConnectedIds.has(entA.partId);
-            const bMC = motorConnectedIds.has(entB.partId);
+            const aMC = motorConnectedRoots.has(rA);
+            const bMC = motorConnectedRoots.has(rB);
             if (aMC && !bMC) {
-              parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, whA.x, whA.y);
+              parts[rIdxB] = applyPositionConstraintLocal(parts[rIdxB], effB, whA.x, whA.y);
             } else if (bMC && !aMC) {
-              parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, whB.x, whB.y);
-            } else {
+              parts[rIdxA] = applyPositionConstraintLocal(parts[rIdxA], effA, whB.x, whB.y);
+            } else if (!aMC && !bMC) {
               const tX = (whA.x + whB.x) / 2;
               const tY = (whA.y + whB.y) / 2;
-              parts[idxA] = applyPositionConstraint(parts[idxA], entA.holeIdx, tX, tY);
-              parts[idxB] = applyPositionConstraint(parts[idxB], entB.holeIdx, tX, tY);
+              parts[rIdxA] = applyPositionConstraintLocal(parts[rIdxA], effA, tX, tY);
+              parts[rIdxB] = applyPositionConstraintLocal(parts[rIdxB], effB, tX, tY);
             }
           }
         }
       }
     }
 
-    // Weld transforms
-    const pbMap = new Map(parts.map(p => [p.id, p]));
-    for (const wt of weldTransforms) {
-      const pA = pbMap.get(wt.partIdA);
-      if (!pA) continue;
-      const bIdx = parts.findIndex(p => p.id === wt.partIdB);
-      if (bIdx < 0) continue;
-      const wOff = rotate({ x: wt.localOffX, y: wt.localOffY }, pA.rotation);
-      parts[bIdx] = { ...parts[bIdx], x: pA.x + wOff.x, y: pA.y + wOff.y, rotation: pA.rotation + wt.relRotDeg };
-    }
+    // Propagate root updates to all cluster members — single pass per iteration,
+    // replacing the per-weld teleport cascade.
+    slaveClusterMembers(parts, clusters);
   }
 
-  // Re-snap fully-fixed parts after PBD — prevents any accumulated drift
   snapFullyFixed();
 
-  // Jam detection: check all pivot joints where either part is motor-connected.
-  // This catches disconnections anywhere in the driven chain, not just at the motor joint.
+  // Jam detection: residual gap on any motor-driven pivot.
   let jammed = false;
   for (const joint of joints) {
     if (joint.kind === "ground") continue;
     const cm = constraintMap.get(joint.id);
     if (!cm || cm.length < 2) continue;
     const [entA, entB] = cm;
-    const eitherMC = motorConnectedIds.has(entA.partId) || motorConnectedIds.has(entB.partId);
-    if (!eitherMC) continue;
-    const whA = simWorldHole(parts.find(p => p.id === entA.partId) ?? simParts.find(p => p.id === entA.partId), entA.holeIdx);
-    const whB = simWorldHole(parts.find(p => p.id === entB.partId) ?? simParts.find(p => p.id === entB.partId), entB.holeIdx);
+    const rA = rootOf(entA.partId), rB = rootOf(entB.partId);
+    if (rA === rB) continue;
+    const either = motorConnectedRoots.has(rA) || motorConnectedRoots.has(rB);
+    if (!either) continue;
+    const whA = memberWorldHole(clusters, parts, entA.partId, entA.holeIdx);
+    const whB = memberWorldHole(clusters, parts, entB.partId, entB.holeIdx);
     if (whA && whB && Math.hypot(whA.x - whB.x, whA.y - whB.y) > 0.5) {
       jammed = true;
       break;
@@ -1261,11 +1396,17 @@ export default function ZineMachine() {
     const initParts = st.parts.map(p => ({ ...p }));
     const initJoints = [...st.joints];
     const cm = buildConstraintMap(initParts, initJoints);
-    const wt = buildWeldTransforms(initParts, initJoints);
     let cur = initParts;
+    let rapier = null; // set once async build resolves
 
-    simRef.current = { constraintMap: cm, weldTransforms: wt, joints: initJoints, getCur: () => cur };
+    simRef.current = { constraintMap: cm, joints: initJoints, getCur: () => cur };
     lastTimeRef.current = null;
+
+    // Build Rapier world asynchronously; RAF loop runs once it's ready
+    buildRapierSim(initParts, initJoints, cm, getLocalHoles, worldHoles)
+      .then(r => { rapier = r; })
+      .catch(err => console.error("[rapier] build failed:", err));
+
     const loop = (time) => {
       try {
         if (pausedRef.current) {
@@ -1276,7 +1417,17 @@ export default function ZineMachine() {
         if (!lastTimeRef.current) lastTimeRef.current = time;
         const dt = Math.min((time - lastTimeRef.current) / 1000, 0.05);
         lastTimeRef.current = time;
-        const { parts: nextParts, jammed } = stepSimulation(cur, initJoints, cm, wt, dt);
+
+        let nextParts, jammed;
+        if (rapier) {
+          rapier.step(dt);
+          nextParts = rapier.readParts(cur);
+          jammed = false;
+        } else {
+          // Rapier not ready yet — hold still
+          nextParts = cur;
+          jammed = false;
+        }
         cur = nextParts;
         // Weld stamps to their host part holes
         cur = cur.map(stamp => {
