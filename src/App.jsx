@@ -26,6 +26,8 @@ const BOARD_PAD = 0.7;             // grid units of padding around the board
 const MAX_HISTORY = 80;
 const SELECT_STROKE = 2.5;         // dashed halo stroke width
 const MOTOR_SPEED_DEG = 90;        // degrees per second
+const HANDLE_R = 9;                // handle dot radius px
+const CAP_PAD_GU = (STRIP_W / 2 * GRID + HANDLE_R + 2) / GRID; // grid units past last hole to handle centre
 
 // Bell instrument notes
 const NOTES = {
@@ -72,7 +74,21 @@ const COLORS = {
   ground:      "#4aa3ff",
   sidebar:     "#120a0e",
   divider:     "#2a1a20",
+  ghostHandle: "#e07060",   // salmon ghost handle
+  scalingFill: "#d4899a",   // strip fill during scale drag
+  scalingHole: "#8a3a50",   // hole color during scale drag
 };
+
+// ---- Custom SVG cursor helpers ----
+// Path-only content (no outer SVG wrapper) for each cursor type
+const _ROTATE_TR_PATHS = `<path d="M11 6C11.9193 6 12.8295 6.18106 13.6788 6.53284C14.5281 6.88463 15.2997 7.40024 15.9497 8.05025C16.5998 8.70026 17.1154 9.47194 17.4672 10.3212C17.8189 11.1705 18 12.0807 18 13V16H22L16 22L10 16H14V13C14 12.606 13.9224 12.2159 13.7716 11.8519C13.6209 11.488 13.3999 11.1573 13.1213 10.8787C12.8427 10.6001 12.512 10.3791 12.1481 10.2284C11.7841 10.0776 11.394 10 11 10H8V14L2 8L8 2V6H11Z" fill="white"/><path d="M11 9H7V11.5L3.5 8L7 4.5L7 7H11C11.7879 7 12.5682 7.15519 13.2961 7.45672C14.0241 7.75825 14.6855 8.20021 15.2426 8.75736C15.7998 9.31451 16.2418 9.97594 16.5433 10.7039C16.8448 11.4319 17 12.2121 17 13V17L19.5 17L16 20.5L12.5 17H15V13C15 12.4747 14.8965 11.9546 14.6955 11.4693C14.4945 10.984 14.1999 10.543 13.8284 10.1716C13.457 9.80014 13.016 9.5055 12.5307 9.30448C12.0454 9.10346 11.5253 9 11 9Z" fill="black"/>`;
+const _RESIZE_EW_PATHS = `<path d="M5.41 12L9 8.41V11H15V8.42L18.58 12L15 15.59V13H9V15.59L5.41 12ZM4 12L10 18V14H14V18L20 12L14 6V10H10V6L4 12Z" fill="white"/><path d="M12.5 13H15.02V15.59L18.58 12L15.02 8.42001V11.02H12.5H9V8.42001L5.41 12L9 15.59V13H12.5Z" fill="black"/>`;
+
+function makeCursor(paths, rotateDeg = 0, hx = 12, hy = 12) {
+  const t = rotateDeg !== 0 ? ` transform="rotate(${rotateDeg.toFixed(1)} 12 12)"` : '';
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none'><g${t}>${paths}</g></svg>`;
+  return `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}") ${hx} ${hy}, auto`;
+}
 
 const PALETTE = [
   { id: "strip",    type: "strip" },
@@ -402,7 +418,7 @@ function reducer(state, action) {
 }
 
 // ---------- Part shapes (pure SVG) ----------
-function StripShape({ part, ghost = false }) {
+function StripShape({ part, ghost = false, selected = false, pivotIdx = 0, scaling = false }) {
   const n = part.size;
   const len = (n - 1) * GRID;
   const w = STRIP_W * GRID;
@@ -414,18 +430,33 @@ function StripShape({ part, ghost = false }) {
         x={-pad} y={-w / 2}
         width={len + 2 * pad} height={w}
         rx={w / 2} ry={w / 2}
-        fill={COLORS.part}
+        fill={scaling ? COLORS.scalingFill : COLORS.part}
         stroke={COLORS.partEdge}
         strokeWidth="1.4"
       />
-      {holes.map((h, i) => (
-        <circle key={i} cx={h.x * GRID} cy={h.y * GRID} r={HOLE_R_PART} fill={COLORS.partHole} />
-      ))}
+      {selected && (
+        <line x1={0} y1={0} x2={len} y2={0}
+          stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="4 3"
+          pointerEvents="none" />
+      )}
+      {holes.map((h, i) => {
+        const isPivot = selected && i === pivotIdx;
+        return (
+          <g key={i}>
+            {isPivot && (
+              <circle cx={h.x * GRID} cy={0} r={4.6}
+                fill="none" stroke={COLORS.select} strokeWidth="1.8" pointerEvents="none" />
+            )}
+            <circle cx={h.x * GRID} cy={0} r={HOLE_R_PART}
+              fill={scaling ? COLORS.scalingHole : COLORS.partHole} />
+          </g>
+        );
+      })}
     </g>
   );
 }
 
-function SlottedStripShape({ part, ghost = false }) {
+function SlottedStripShape({ part, ghost = false, selected = false, pivotIdx = 0, scaling = false }) {
   const n = part.size;
   const len = (n - 1) * GRID;
   const w = STRIP_W * GRID;
@@ -439,10 +470,15 @@ function SlottedStripShape({ part, ghost = false }) {
         x={-pad} y={-w / 2}
         width={len + 2 * pad} height={w}
         rx={w / 2} ry={w / 2}
-        fill={COLORS.part}
+        fill={scaling ? COLORS.scalingFill : COLORS.part}
         stroke={COLORS.partEdge}
         strokeWidth="1.4"
       />
+      {selected && (
+        <line x1={0} y1={0} x2={len} y2={0}
+          stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="4 3"
+          pointerEvents="none" />
+      )}
       {/* slot */}
       <rect
         x={slotPad} y={-slotW / 2}
@@ -450,9 +486,19 @@ function SlottedStripShape({ part, ghost = false }) {
         rx={slotW / 2} ry={slotW / 2}
         fill={COLORS.slot}
       />
-      {holes.map((h, i) => (
-        <circle key={i} cx={h.x * GRID} cy={h.y * GRID} r={HOLE_R_PART} fill={COLORS.partHole} />
-      ))}
+      {holes.map((h, i) => {
+        const isPivot = selected && i === pivotIdx;
+        return (
+          <g key={i}>
+            {isPivot && (
+              <circle cx={h.x * GRID} cy={0} r={4.6}
+                fill="none" stroke={COLORS.select} strokeWidth="1.8" pointerEvents="none" />
+            )}
+            <circle cx={h.x * GRID} cy={0} r={HOLE_R_PART}
+              fill={scaling ? COLORS.scalingHole : COLORS.partHole} />
+          </g>
+        );
+      })}
     </g>
   );
 }
@@ -571,17 +617,19 @@ function StampShape({ part, ghost = false }) {
   );
 }
 
-function PartShape({ part, ghost = false, selected = false }) {
+function PartShape({ part, ghost = false, selected = false, scaling = false }) {
+  const pivotIdx = part.pivotHoleIdx ?? 0;
+  const isStrip = part.type === "strip" || part.type === "slottedStrip";
   let shape;
-  if (part.type === "strip") shape = <StripShape part={part} ghost={ghost} />;
-  else if (part.type === "slottedStrip") shape = <SlottedStripShape part={part} ghost={ghost} />;
+  if (part.type === "strip") shape = <StripShape part={part} ghost={ghost} selected={selected} pivotIdx={pivotIdx} scaling={scaling} />;
+  else if (part.type === "slottedStrip") shape = <SlottedStripShape part={part} ghost={ghost} selected={selected} pivotIdx={pivotIdx} scaling={scaling} />;
   else if (part.type === "motor") shape = <MotorShape part={part} ghost={ghost} />;
   else if (part.type === "bell") shape = <BellShape part={part} ghost={ghost} />;
   else if (part.type === "stamp") shape = <StampShape part={part} ghost={ghost} />;
   else shape = <PolyShape part={part} ghost={ghost} />;
   return (
     <g transform={`translate(${part.x * GRID},${part.y * GRID}) rotate(${part.rotation})`}>
-      {selected && !ghost && <SelectionHalo part={part} />}
+      {selected && !ghost && !isStrip && <SelectionHalo part={part} />}
       {shape}
     </g>
   );
@@ -613,8 +661,7 @@ function rotationHandleLocal(part) {
     const dx = otherHole.x - pivotHole.x, dy = otherHole.y - pivotHole.y;
     const len = Math.hypot(dx, dy);
     if (len < 0.001) return { x: 1.1, y: 0 };
-    // Place handle 1.1 grid units past the far end from the pivot
-    return { x: otherHole.x + (dx / len) * 1.1, y: otherHole.y + (dy / len) * 1.1 };
+    return { x: otherHole.x + (dx / len) * CAP_PAD_GU, y: otherHole.y + (dy / len) * CAP_PAD_GU };
   }
   const maxD = Math.max(...holes.map(h => Math.hypot(h.x, h.y)));
   return { x: maxD + 1.1, y: 0 };
@@ -1355,7 +1402,6 @@ export default function ZineMachine() {
   const [selectedJointId, setSelectedJointId] = useState(null);
   const [jointCtxMenu, setJointCtxMenu] = useState(null);
   const [jointDrag, setJointDrag] = useState(null);
-  const [hoverPivotHole, setHoverPivotHole] = useState(null);
 
   // Simulation state
   const [simParts, setSimParts] = useState(null);
@@ -1365,7 +1411,7 @@ export default function ZineMachine() {
   const [multiSelectedIds, setMultiSelectedIds] = useState(new Set());
   const multiSelectedIdsRef = useRef(new Set());
   useEffect(() => { multiSelectedIdsRef.current = multiSelectedIds; }, [multiSelectedIds]);
-  const [hoverRotHandle, setHoverRotHandle] = useState(false);
+  const [handleZone, setHandleZone] = useState(null); // null | 'scale' | 'rotate'
   const simRef = useRef(null);
   const rafRef = useRef(null);
   const lastTimeRef = useRef(null);
@@ -1374,7 +1420,7 @@ export default function ZineMachine() {
   const stampWeldRef = useRef(null); // { partId, holeIdx } set during stamp drag, applied on drop
 
   useEffect(() => { pausedRef.current = simPaused; }, [simPaused]);
-  useEffect(() => { setHoverRotHandle(false); }, [st.selectedId]);
+  useEffect(() => { setHandleZone(null); }, [st.selectedId]);
 
   // Auto-save to localStorage on every design change
   useEffect(() => {
@@ -1508,21 +1554,49 @@ export default function ZineMachine() {
   const boardW = (COLS - 1 + BOARD_PAD * 2) * GRID;
   const boardH = (ROWS - 1 + BOARD_PAD * 2) * GRID;
 
-  const handleZoom = useCallback((delta) => {
+  const applyZoom = useCallback((newZoom, pivotClientX, pivotClientY) => {
     const svg = svgRef.current;
-    const newZoom = Math.max(0.5, Math.min(1.5, zoomRef.current + delta));
     if (newZoom === zoomRef.current) return;
     if (svg) {
       const rect = svg.getBoundingClientRect();
-      const cx = rect.width / 2, cy = rect.height / 2;
+      const px = pivotClientX ?? rect.width / 2;
+      const py = pivotClientY ?? rect.height / 2;
       const ratio = newZoom / zoomRef.current;
       setCamera(prev => ({
-        x: prev.x * ratio + cx * (ratio - 1),
-        y: prev.y * ratio + cy * (ratio - 1),
+        x: prev.x * ratio + px * (ratio - 1),
+        y: prev.y * ratio + py * (ratio - 1),
       }));
     }
     setZoom(newZoom);
   }, []);
+
+  // Button zoom: snap through 100% so a single click always lands on 1.0 when crossing it
+  const handleZoom = useCallback((delta) => {
+    const cur = zoomRef.current;
+    let raw = Math.max(0.5, Math.min(1.5, cur + delta));
+    if ((cur < 1 && raw > 1) || (cur > 1 && raw < 1)) raw = 1;
+    applyZoom(raw, null, null);
+  }, [applyZoom]);
+
+  // Wheel zoom: cursor-centred, 100% acts as a sticky snap point
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const delta = -e.deltaY * 0.001;
+      const cur = zoomRef.current;
+      let raw = Math.max(0.5, Math.min(1.5, cur + delta));
+      // Sticky at 100%: if crossing 100%, land exactly on it
+      if ((cur < 1 && raw > 1) || (cur > 1 && raw < 1)) raw = 1;
+      // Small dead-zone: don't move away from 100% on tiny twitches
+      if (cur === 1 && Math.abs(delta) < 0.012) return;
+      const rect = svg.getBoundingClientRect();
+      applyZoom(raw, e.clientX - rect.left, e.clientY - rect.top);
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [applyZoom]);
 
   // ---- Pointer utilities ----
   const pointerToGrid = useCallback((e) => {
@@ -1577,13 +1651,15 @@ export default function ZineMachine() {
           const d = Math.hypot(g.x - th.x, g.y - th.y);
           if (d < bestDist) { bestDist = d; holePos = { x: th.x, y: th.y }; }
         }
-        if (other.type === "slottedStrip") {
+        if (other.type === "strip" || other.type === "slottedStrip") {
           const θr = other.rotation * Math.PI / 180;
           const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
           const relX = g.x - other.x, relY = g.y - other.y;
           const along = relX * cosθ + relY * sinθ;
           const perp = Math.abs(-relX * sinθ + relY * cosθ);
-          if (along >= 0.4 && along <= other.size - 1.4 && perp < 0.5) {
+          const bodyStart = other.type === "slottedStrip" ? 0.4 : 0;
+          const bodyEnd = other.type === "slottedStrip" ? other.size - 1.4 : other.size - 1;
+          if (along >= bodyStart && along <= bodyEnd && perp < 0.5) {
             const sx = other.x + along * cosθ, sy = other.y + along * sinθ;
             const d = Math.hypot(g.x - sx, g.y - sy);
             if (d < bestDist) { bestDist = d; holePos = { x: sx, y: sy }; }
@@ -1624,23 +1700,6 @@ export default function ZineMachine() {
       setJointSnap(null);
     }
 
-    // Pivot hole hover tracking for selected strip
-    const selPart = st.parts.find(p => p.id === st.selectedId);
-    if (selPart && st.tool === "select" && (selPart.type === "strip" || selPart.type === "slottedStrip")) {
-      const opts = getPivotHoleOptions(selPart);
-      let nearestPivot = null, bestPivotDist = 0.8;
-      for (const hIdx of opts) {
-        const wh = worldHoles(selPart)[hIdx];
-        if (wh) {
-          const d = Math.hypot(g.x - wh.x, g.y - wh.y);
-          if (d < bestPivotDist) { bestPivotDist = d; nearestPivot = hIdx; }
-        }
-      }
-      setHoverPivotHole(nearestPivot !== null ? { partId: selPart.id, holeIdx: nearestPivot } : null);
-    } else {
-      setHoverPivotHole(null);
-    }
-
     if (selRect) {
       setSelRect(r => ({ ...r, x2: g.x, y2: g.y }));
       return;
@@ -1674,13 +1733,15 @@ export default function ZineMachine() {
       const rawX = g.x + offX;
       const rawY = g.y + offY;
 
-      // Try snapping a hole on the dragged part to any hole on another part
+      // Snap using the hole nearest to the grab point (not all holes)
       const draggedPart = st.parts.find(p => p.id === drag.id);
       const rotation = draggedPart?.rotation ?? 0;
       let snappedToPartHole = null;
       let newSnapHint = null;
       if (draggedPart) {
         const localHoles = getLocalHoles(draggedPart);
+        // Use the grab-time nearest hole; fall back to index 0
+        const snapHole = localHoles[drag.snapHoleIdx ?? 0] ?? localHoles[0];
         let bestDist = 0.9; // snap radius in grid units
         let weldTarget = null;
         for (const other of st.parts) {
@@ -1688,15 +1749,13 @@ export default function ZineMachine() {
           const otherHoles = worldHoles(other);
           for (let hi = 0; hi < otherHoles.length; hi++) {
             const th = otherHoles[hi];
-            for (const lh of localHoles) {
-              const rot = rotate(lh, rotation);
-              const d = Math.hypot((rawX + rot.x) - th.x, (rawY + rot.y) - th.y);
-              if (d < bestDist) {
-                bestDist = d;
-                snappedToPartHole = { x: th.x - rot.x, y: th.y - rot.y };
-                newSnapHint = { x: th.x, y: th.y };
-                if (draggedPart.type === "stamp") weldTarget = { partId: other.id, holeIdx: hi };
-              }
+            const rot = rotate(snapHole, rotation);
+            const d = Math.hypot((rawX + rot.x) - th.x, (rawY + rot.y) - th.y);
+            if (d < bestDist) {
+              bestDist = d;
+              snappedToPartHole = { x: th.x - rot.x, y: th.y - rot.y };
+              newSnapHint = { x: th.x, y: th.y };
+              if (draggedPart.type === "stamp") weldTarget = { partId: other.id, holeIdx: hi };
             }
           }
         }
@@ -1716,11 +1775,29 @@ export default function ZineMachine() {
         const rawDeg = Math.atan2(g.y - jy, g.x - jx) * 180 / Math.PI - (drag.handleAngle ?? 0) * 180 / Math.PI;
         const snappedDeg = snap(rawDeg);
         const r = rotate(localHole, snappedDeg);
+        // Accumulate rotation for arc (handles wrap-around at ±180°)
+        let inc = snappedDeg - p.rotation;
+        while (inc > 180) inc -= 360;
+        while (inc < -180) inc += 360;
+        setDrag({ ...drag, cumulativeRot: (drag.cumulativeRot ?? 0) + inc });
         dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { rotation: snappedDeg, x: jx - r.x, y: jy - r.y } });
       } else {
         const rawDeg = Math.atan2(g.y - p.y, g.x - p.x) * 180 / Math.PI;
         dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { rotation: snap(rawDeg) } });
       }
+    } else if (drag.kind === "resize") {
+      const { pivotWorld, axisDir, pivotIdx } = drag;
+      const dx = g.x - pivotWorld.x;
+      const dy = g.y - pivotWorld.y;
+      const projected = dx * axisDir.x + dy * axisDir.y;
+      const newSize = Math.max(2, Math.round(projected) + 1);
+      const rotRad = drag.origPart.rotation * Math.PI / 180;
+      // When pivot is the "last hole" end (pivotIdx !== 0), part.x = hole[0] position must slide
+      // as size changes so hole[newSize-1] stays at pivotWorld, not hole[pivotIdx].
+      const anchorOffset = pivotIdx === 0 ? 0 : newSize - 1;
+      const newX = pivotWorld.x - Math.cos(rotRad) * anchorOffset;
+      const newY = pivotWorld.y - Math.sin(rotRad) * anchorOffset;
+      dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { size: newSize, x: newX, y: newY } });
     }
   };
 
@@ -1930,11 +2007,23 @@ export default function ZineMachine() {
       dispatch({ type: "SELECT", id: part.id });
       setMultiSelectedIds(new Set());
       dispatch({ type: "SNAPSHOT" });
+      // Find which local hole is closest to the grab point → snap that hole to targets
+      const grabX = g?.x ?? 0, grabY = g?.y ?? 0;
+      const localHoles = getLocalHoles(part);
+      const rotRad0 = (part.rotation ?? 0) * Math.PI / 180;
+      let snapHoleIdx = 0, snapBest = Infinity;
+      localHoles.forEach((lh, i) => {
+        const wx = part.x + lh.x * Math.cos(rotRad0) - lh.y * Math.sin(rotRad0);
+        const wy = part.y + lh.x * Math.sin(rotRad0) + lh.y * Math.cos(rotRad0);
+        const d = Math.hypot(grabX - wx, grabY - wy);
+        if (d < snapBest) { snapBest = d; snapHoleIdx = i; }
+      });
       setDrag({
         kind: "move",
         id: part.id,
-        startX: g?.x ?? 0, startY: g?.y ?? 0,
+        startX: grabX, startY: grabY,
         origPart: { ...part },
+        snapHoleIdx,
       });
     }
   };
@@ -1958,12 +2047,35 @@ export default function ZineMachine() {
       }
     }
 
-    // Angle of handle relative to pivot in local space — needed to correct atan2 when handle is at -x
     const handleLocal = rotationHandleLocal(part);
     const pivotLocal = localHoles[pivotIdx] ?? { x: 0, y: 0 };
     const handleAngle = Math.atan2(handleLocal.y - pivotLocal.y, handleLocal.x - pivotLocal.x);
 
-    setDrag({ kind: "rotate", id: part.id, origPart: { ...part }, pivot, handleAngle });
+    setDrag({ kind: "rotate", id: part.id, origPart: { ...part }, pivot, handleAngle, cumulativeRot: 0 });
+
+    // Synchronous safety net: clear drag on next pointerup no matter where it lands
+    const clearRotateDrag = () => {
+      setDrag(null);
+      window.removeEventListener("pointerup", clearRotateDrag);
+    };
+    window.addEventListener("pointerup", clearRotateDrag);
+  };
+
+  const handleScaleHandleDown = (e, part) => {
+    e.stopPropagation();
+    if (part.type !== "strip" && part.type !== "slottedStrip") return;
+    dispatch({ type: "SELECT", id: part.id });
+    dispatch({ type: "SNAPSHOT" });
+
+    const pivotIdx = part.pivotHoleIdx ?? 0;
+    const wh = worldHoles(part);
+    const pivotWorld = wh[pivotIdx] ?? { x: part.x, y: part.y };
+    const rotRad = part.rotation * Math.PI / 180;
+    // Axis direction: from pivot toward far end
+    const sign = pivotIdx === 0 ? 1 : -1;
+    const axisDir = { x: Math.cos(rotRad) * sign, y: Math.sin(rotRad) * sign };
+
+    setDrag({ kind: "resize", id: part.id, origPart: { ...part }, pivotWorld, axisDir, pivotIdx });
   };
 
 
@@ -2143,6 +2255,33 @@ export default function ZineMachine() {
 
   const jointToolActive = ["pivot", "weld", "ground"].includes(st.tool);
 
+  // Compute SVG canvas cursor — custom data-URI for rotate/scale zones
+  const svgCanvasCursor = (() => {
+    if (spaceHeld) return drag?.kind === "space-pan" ? "grabbing" : "grab";
+    if (st.tool === "hand") return drag?.kind === "pan" ? "grabbing" : "grab";
+    if (st.tool === "place") return "crosshair";
+    if (st.tool === "delete") return "not-allowed";
+    if (jointToolActive) return "crosshair";
+    if (drag?.kind === "move" || drag?.kind === "multi-move") return "move";
+    const isStripSelected = selectedPart && (selectedPart.type === "strip" || selectedPart.type === "slottedStrip");
+    if (isStripSelected && (handleZone === "rotate" || drag?.kind === "rotate")) {
+      const pIdx = selectedPart.pivotHoleIdx ?? 0;
+      const pwh = worldHoles(selectedPart)[pIdx];
+      const hl = rotationHandleLocal(selectedPart);
+      const hr = rotate(hl, selectedPart.rotation);
+      const hx = (selectedPart.x + hr.x) * GRID;
+      const hy = (selectedPart.y + hr.y) * GRID;
+      const px = pwh ? pwh.x * GRID : selectedPart.x * GRID;
+      const py = pwh ? pwh.y * GRID : selectedPart.y * GRID;
+      const radiusAngle = Math.atan2(hy - py, hx - px);
+      return makeCursor(_ROTATE_TR_PATHS, radiusAngle * 180 / Math.PI + 90 - 45);
+    }
+    if (isStripSelected && (handleZone === "scale" || drag?.kind === "resize")) {
+      return makeCursor(_RESIZE_EW_PATHS, selectedPart.rotation);
+    }
+    return "default";
+  })();
+
   return (
     <div
       className="w-full h-screen flex flex-col"
@@ -2172,14 +2311,7 @@ export default function ZineMachine() {
             ref={svgRef}
             style={{
               display: "block", width: "100%", height: "100%",
-              cursor:
-                spaceHeld ? (drag?.kind === "space-pan" ? "grabbing" : "grab") :
-                st.tool === "hand" ? (drag?.kind === "pan" ? "grabbing" : "grab") :
-                st.tool === "place" ? "crosshair" :
-                st.tool === "delete" ? "not-allowed" :
-                jointToolActive ? "crosshair" :
-                drag?.kind === "move" || drag?.kind === "multi-move" ? "move" :
-                drag?.kind === "rotate" ? "grabbing" : "default",
+              cursor: svgCanvasCursor,
             }}
             onPointerDown={handleSvgDown}
             onPointerMove={handleSvgMove}
@@ -2244,7 +2376,11 @@ export default function ZineMachine() {
                     setCtxMenu({ x: e.clientX, y: e.clientY, part: p, multiIds: isMulti ? [...multiSelectedIds] : null });
                   }}
                 >
-                  <PartShape part={p} selected={p.id === st.selectedId && st.mode === "build"} />
+                  <PartShape
+                    part={p}
+                    selected={p.id === st.selectedId && st.mode === "build"}
+                    scaling={drag?.kind === "resize" && drag.id === p.id}
+                  />
                 </g>
               ))}
             </g>
@@ -2270,43 +2406,23 @@ export default function ZineMachine() {
             {selectedPart && st.mode === "build" && (
               <RotationHandle
                 part={selectedPart}
-                onPointerDown={(e) => handleRotateHandleDown(e, selectedPart)}
-                hovered={hoverRotHandle}
-                onHoverChange={(v) => setHoverRotHandle(v)}
-                onSwitchPivot={() => {
-                  const pivotIdx = selectedPart.pivotHoleIdx ?? 0;
-                  const otherIdx = pivotIdx === 0 ? selectedPart.size - 1 : 0;
-                  dispatch({ type: "UPDATE_PART", id: selectedPart.id, updates: { pivotHoleIdx: otherIdx } });
+                zone={handleZone}
+                onZoneChange={setHandleZone}
+                onRotateDown={(e) => handleRotateHandleDown(e, selectedPart)}
+                onScaleDown={(e) => handleScaleHandleDown(e, selectedPart)}
+                activeDrag={drag?.kind}
+                dragStartRotation={drag?.kind === "rotate" ? drag.origPart?.rotation : undefined}
+                cumulativeRot={drag?.kind === "rotate" ? (drag.cumulativeRot ?? 0) : 0}
+                onDragEnd={() => setDrag(null)}
+                onGhostDown={(e) => {
+                  e.stopPropagation();
+                  const part = selectedPart;
+                  const pivotIdx = part.pivotHoleIdx ?? 0;
+                  const newPivotIdx = pivotIdx === 0 ? part.size - 1 : 0;
+                  dispatch({ type: "UPDATE_PART", id: part.id, updates: { pivotHoleIdx: newPivotIdx } });
+                  dispatch({ type: "SNAPSHOT" });
                 }}
               />
-            )}
-
-            {/* Pivot hole options for selected strip */}
-            {selectedPart && st.mode === "build" && st.tool === "select" &&
-              (selectedPart.type === "strip" || selectedPart.type === "slottedStrip") && (
-              <g pointerEvents="all">
-                {getPivotHoleOptions(selectedPart).map(hIdx => {
-                  const wh = worldHoles(selectedPart)[hIdx];
-                  if (!wh) return null;
-                  const isActive = (selectedPart.pivotHoleIdx ?? 0) === hIdx;
-                  const isHov = hoverPivotHole?.partId === selectedPart.id && hoverPivotHole?.holeIdx === hIdx;
-                  return (
-                    <circle
-                      key={hIdx}
-                      cx={wh.x * GRID} cy={wh.y * GRID}
-                      r={isActive ? 7 : isHov ? 6 : 5}
-                      fill={isActive ? COLORS.select : isHov ? COLORS.select + "99" : "rgba(255,210,63,0.25)"}
-                      stroke={COLORS.select}
-                      strokeWidth="1.5"
-                      style={{ cursor: "pointer" }}
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        dispatch({ type: "UPDATE_PART", id: selectedPart.id, updates: { pivotHoleIdx: hIdx } });
-                      }}
-                    />
-                  );
-                })}
-              </g>
             )}
 
             {/* Multi-select halos */}
@@ -2344,7 +2460,7 @@ export default function ZineMachine() {
 
             {/* Joints — rendered last so they are always on top */}
             <g>
-              {st.joints.map(j => {
+              {st.joints.filter(j => !(drag?.kind === "resize" && j.partIds.includes(drag.id))).map(j => {
                 let jx = j.x, jy = j.y;
                 if (simParts && simRef.current?.constraintMap) {
                   const cm = simRef.current.constraintMap.get(j.id);
@@ -2642,12 +2758,13 @@ function JointPin({ joint, onPointerDown, deletable, overrideX, overrideY, selec
   );
 }
 
-// ---------- Rotation handle ----------
-function RotationHandle({ part, onPointerDown, hovered, onHoverChange, onSwitchPivot }) {
+// ---------- Part handle (dual-state: scale inner zone, rotate outer ring) ----------
+function RotationHandle({ part, zone, onZoneChange, onRotateDown, onScaleDown, activeDrag, dragStartRotation, cumulativeRot, onDragEnd, onGhostDown }) {
   const local = rotationHandleLocal(part);
   const rotated = rotate(local, part.rotation);
   const cx = (part.x + rotated.x) * GRID;
   const cy = (part.y + rotated.y) * GRID;
+
   const pivotIdx = part.pivotHoleIdx ?? 0;
   const wh = worldHoles(part);
   const pivotWH = wh[pivotIdx];
@@ -2656,35 +2773,91 @@ function RotationHandle({ part, onPointerDown, hovered, onHoverChange, onSwitchP
 
   const isStrip = part.type === "strip" || part.type === "slottedStrip";
   const otherIdx = isStrip ? (pivotIdx === 0 ? part.size - 1 : 0) : null;
-  // Ghost handle = where handle would be with the other pivot selected
   const ghostLocal = isStrip && otherIdx !== null
     ? rotationHandleLocal({ ...part, pivotHoleIdx: otherIdx })
-    : { x: -local.x, y: -local.y };
-  const ghostRotated = rotate(ghostLocal, part.rotation);
-  const gx = (part.x + ghostRotated.x) * GRID;
-  const gy = (part.y + ghostRotated.y) * GRID;
+    : null;
+  const ghostRotated = ghostLocal ? rotate(ghostLocal, part.rotation) : null;
+  const gx = ghostRotated ? (part.x + ghostRotated.x) * GRID : null;
+  const gy = ghostRotated ? (part.y + ghostRotated.y) * GRID : null;
+
+  // Full radius (pivot → active handle) for rotation circle
+  const rotCircleR = Math.hypot(cx - ax, cy - ay);
+
+  // Last hole world position for protractor arc radius
+  const lastHoleWH = wh[otherIdx ?? 0];
+  const lhx = lastHoleWH ? lastHoleWH.x * GRID : cx;
+  const lhy = lastHoleWH ? lastHoleWH.y * GRID : cy;
+  const arcR = Math.hypot(lhx - ax, lhy - ay);
+
+  const showRotCircle = zone === "rotate" || activeDrag === "rotate";
+  const showArc = activeDrag === "rotate";
+
+  // Protractor arc: sweeps from drag-start position to current other-hole position
+  // "zero" = where the strip was when rotation began, not 3 o'clock
+  // When pivotIdx=size-1, the other hole is at rotation+180° from pivot
+  const startDeg = dragStartRotation ?? 0;
+  const startRad = startDeg * Math.PI / 180;
+  const startDir = (pivotIdx === 0 ? startRad : startRad + Math.PI);
+  const baselineEndX = ax + rotCircleR * Math.cos(startDir);
+  const baselineEndY = ay + rotCircleR * Math.sin(startDir);
+  let arcPath = null;
+  if (showArc && arcR > 4) {
+    const sx = ax + arcR * Math.cos(startDir);
+    const sy = ay + arcR * Math.sin(startDir);
+    const ex = lhx;
+    const ey = lhy;
+    // Use cumulative rotation so arc doesn't flip at ±180°
+    const totalDeg = cumulativeRot ?? 0;
+    const sweep = totalDeg >= 0 ? 1 : 0;
+    const large = Math.abs(totalDeg) % 360 > 180 ? 1 : 0;
+    arcPath = `M ${sx} ${sy} A ${arcR} ${arcR} 0 ${large} ${sweep} ${ex} ${ey}`;
+  }
 
   return (
     <g>
-      <line x1={ax} y1={ay} x2={cx} y2={cy} stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="3 3" opacity="0.8" />
-      {/* Invisible trigger zone at the opposite end — hovering here reveals the ghost */}
-      {isStrip && otherIdx !== null && (
-        <g
-          style={{ cursor: hovered ? "pointer" : "default" }}
-          onPointerDown={hovered ? (e) => { e.stopPropagation(); onSwitchPivot?.(); } : undefined}
-          onMouseEnter={() => onHoverChange?.(true)}
-          onMouseLeave={() => onHoverChange?.(false)}
-        >
-          <circle cx={gx} cy={gy} r={50} fill="transparent" />
-          {hovered && (
-            <circle cx={gx} cy={gy} r={8} fill={COLORS.select} opacity="0.35" stroke={COLORS.select} strokeWidth="1.4" strokeDasharray="3 2" />
+      {/* Axis dashed line from pivot hole to active handle */}
+      <line x1={ax} y1={ay} x2={cx} y2={cy}
+        stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="3 3" opacity="0.9" pointerEvents="none" />
+
+      {/* Rotation circle — on hover OR during drag */}
+      {showRotCircle && rotCircleR > 4 && (
+        <circle cx={ax} cy={ay} r={rotCircleR}
+          fill="none" stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="7 5" opacity="0.8" pointerEvents="none" />
+      )}
+
+      {/* During rotate drag: baseline + protractor arc */}
+      {showArc && (
+        <>
+          <line x1={ax} y1={ay} x2={baselineEndX} y2={baselineEndY}
+            stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="4 3" pointerEvents="none" />
+          {arcPath && (
+            <path d={arcPath}
+              fill="none" stroke={COLORS.select} strokeWidth="2" strokeLinecap="round" pointerEvents="none" />
           )}
+        </>
+      )}
+
+      {/* Ghost handle (salmon) — hidden during scale drag */}
+      {isStrip && gx !== null && gy !== null && activeDrag !== "resize" && (
+        <g onPointerDown={(e) => { e.stopPropagation(); onGhostDown?.(e); }}>
+          <circle cx={gx} cy={gy} r={20} fill="none" pointerEvents="all" />
+          <circle cx={gx} cy={gy} r={HANDLE_R}
+            fill={COLORS.ghostHandle} stroke={COLORS.partEdge} strokeWidth="1.4" opacity="0.7" pointerEvents="none" />
         </g>
       )}
-      {/* Active handle — large invisible hit area + small visible dot */}
-      <g style={{ cursor: "grab" }} onPointerDown={onPointerDown}>
-        <circle cx={cx} cy={cy} r={22} fill="transparent" />
-        <circle cx={cx} cy={cy} r={8} fill={COLORS.select} stroke={COLORS.partEdge} strokeWidth="1.4" />
+
+      {/* Active handle — outer ring = rotate, inner = scale */}
+      <g onMouseLeave={() => onZoneChange?.(null)} onPointerUp={(e) => { e.stopPropagation(); onDragEnd?.(); }}>
+        <circle cx={cx} cy={cy} r={20} fill="none" pointerEvents="all"
+          onPointerEnter={() => onZoneChange?.("rotate")}
+          onPointerDown={(e) => { e.stopPropagation(); onRotateDown(e); }} />
+        <circle cx={cx} cy={cy} r={HANDLE_R}
+          fill={COLORS.select} stroke={COLORS.partEdge} strokeWidth="1.4" pointerEvents="none" />
+        {isStrip && (
+          <circle cx={cx} cy={cy} r={HANDLE_R} fill="none" pointerEvents="all"
+            onPointerEnter={() => onZoneChange?.("scale")}
+            onPointerDown={(e) => { e.stopPropagation(); onScaleDown(e); }} />
+        )}
       </g>
     </g>
   );
