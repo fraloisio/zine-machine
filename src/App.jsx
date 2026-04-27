@@ -418,7 +418,7 @@ function reducer(state, action) {
 }
 
 // ---------- Part shapes (pure SVG) ----------
-function StripShape({ part, ghost = false, selected = false, pivotIdx = 0, scaling = false }) {
+function StripShape({ part, ghost = false, selected = false, pivotIdx = 0, scaling = false, highlighted = false }) {
   const n = part.size;
   const len = (n - 1) * GRID;
   const w = STRIP_W * GRID;
@@ -426,6 +426,14 @@ function StripShape({ part, ghost = false, selected = false, pivotIdx = 0, scali
   const holes = getLocalHoles(part);
   return (
     <g opacity={ghost ? 0.45 : 1}>
+      {highlighted && !ghost && (
+        <rect
+          x={-pad - 3} y={-w / 2 - 3}
+          width={len + 2 * pad + 6} height={w + 6}
+          rx={w / 2 + 3} ry={w / 2 + 3}
+          fill="none" stroke={COLORS.select} strokeWidth="2.5" opacity="0.6"
+        />
+      )}
       <rect
         x={-pad} y={-w / 2}
         width={len + 2 * pad} height={w}
@@ -440,7 +448,7 @@ function StripShape({ part, ghost = false, selected = false, pivotIdx = 0, scali
           pointerEvents="none" />
       )}
       {holes.map((h, i) => {
-        const isPivot = selected && i === pivotIdx;
+        const isPivot = selected && i === (part.pivotHoleIdx ?? 0);
         return (
           <g key={i}>
             {isPivot && (
@@ -456,7 +464,7 @@ function StripShape({ part, ghost = false, selected = false, pivotIdx = 0, scali
   );
 }
 
-function SlottedStripShape({ part, ghost = false, selected = false, pivotIdx = 0, scaling = false }) {
+function SlottedStripShape({ part, ghost = false, selected = false, pivotIdx = 0, scaling = false, highlighted = false }) {
   const n = part.size;
   const len = (n - 1) * GRID;
   const w = STRIP_W * GRID;
@@ -466,6 +474,14 @@ function SlottedStripShape({ part, ghost = false, selected = false, pivotIdx = 0
   const holes = getLocalHoles(part);
   return (
     <g opacity={ghost ? 0.45 : 1}>
+      {highlighted && !ghost && (
+        <rect
+          x={-pad - 3} y={-w / 2 - 3}
+          width={len + 2 * pad + 6} height={w + 6}
+          rx={w / 2 + 3} ry={w / 2 + 3}
+          fill="none" stroke={COLORS.select} strokeWidth="2.5" opacity="0.6"
+        />
+      )}
       <rect
         x={-pad} y={-w / 2}
         width={len + 2 * pad} height={w}
@@ -487,7 +503,7 @@ function SlottedStripShape({ part, ghost = false, selected = false, pivotIdx = 0
         fill={COLORS.slot}
       />
       {holes.map((h, i) => {
-        const isPivot = selected && i === pivotIdx;
+        const isPivot = selected && i === (part.pivotHoleIdx ?? 0);
         return (
           <g key={i}>
             {isPivot && (
@@ -617,12 +633,12 @@ function StampShape({ part, ghost = false }) {
   );
 }
 
-function PartShape({ part, ghost = false, selected = false, scaling = false }) {
+function PartShape({ part, ghost = false, selected = false, scaling = false, highlighted = false }) {
   const pivotIdx = part.pivotHoleIdx ?? 0;
   const isStrip = part.type === "strip" || part.type === "slottedStrip";
   let shape;
-  if (part.type === "strip") shape = <StripShape part={part} ghost={ghost} selected={selected} pivotIdx={pivotIdx} scaling={scaling} />;
-  else if (part.type === "slottedStrip") shape = <SlottedStripShape part={part} ghost={ghost} selected={selected} pivotIdx={pivotIdx} scaling={scaling} />;
+  if (part.type === "strip") shape = <StripShape part={part} ghost={ghost} selected={selected} pivotIdx={pivotIdx} scaling={scaling} highlighted={highlighted} />;
+  else if (part.type === "slottedStrip") shape = <SlottedStripShape part={part} ghost={ghost} selected={selected} pivotIdx={pivotIdx} scaling={scaling} highlighted={highlighted} />;
   else if (part.type === "motor") shape = <MotorShape part={part} ghost={ghost} />;
   else if (part.type === "bell") shape = <BellShape part={part} ghost={ghost} />;
   else if (part.type === "stamp") shape = <StampShape part={part} ghost={ghost} />;
@@ -630,6 +646,9 @@ function PartShape({ part, ghost = false, selected = false, scaling = false }) {
   return (
     <g transform={`translate(${part.x * GRID},${part.y * GRID}) rotate(${part.rotation})`}>
       {selected && !ghost && !isStrip && <SelectionHalo part={part} />}
+      {highlighted && !ghost && !isStrip && (
+        <circle cx={0} cy={0} r={12} fill="none" stroke={COLORS.select} strokeWidth="2.5" opacity="0.6" />
+      )}
       {shape}
     </g>
   );
@@ -654,14 +673,30 @@ function SelectionHalo({ part }) {
 function rotationHandleLocal(part) {
   const holes = getLocalHoles(part);
   if (part.type === "strip" || part.type === "slottedStrip") {
+    // We want the handle at one end and the pivot at the other end.
+    // If pivot is currently near the 'start' (hole 0), handle should be beyond the 'end'.
+    // If pivot is currently near the 'end', handle should be beyond the 'start'.
     const pivotIdx = part.pivotHoleIdx ?? 0;
-    const pivotHole = holes[pivotIdx] ?? { x: 0, y: 0 };
-    const otherIdx = pivotIdx === 0 ? holes.length - 1 : 0;
-    const otherHole = holes[otherIdx] ?? { x: 1, y: 0 };
-    const dx = otherHole.x - pivotHole.x, dy = otherHole.y - pivotHole.y;
+    const startHole = holes[0];
+    const endHole = holes[holes.length - 1];
+    
+    // Determine which end is further from the current pivot index
+    const distToStart = Math.abs(pivotIdx - 0);
+    const distToEnd = Math.abs(pivotIdx - (holes.length - 1));
+    
+    // The HANDLE should be at the end that is NOT the pivot.
+    // To satisfy the "always at opposite edge" requirement:
+    // If we are toggling, we force pivot to be one end and handle to be the other.
+    const hIdx = distToStart < distToEnd ? holes.length - 1 : 0;
+    const pIdx = hIdx === 0 ? holes.length - 1 : 0;
+    
+    const hHole = holes[hIdx];
+    const pHole = holes[pIdx];
+    
+    const dx = hHole.x - pHole.x, dy = hHole.y - pHole.y;
     const len = Math.hypot(dx, dy);
     if (len < 0.001) return { x: 1.1, y: 0 };
-    return { x: otherHole.x + (dx / len) * CAP_PAD_GU, y: otherHole.y + (dy / len) * CAP_PAD_GU };
+    return { x: hHole.x + (dx / len) * CAP_PAD_GU, y: hHole.y + (dy / len) * CAP_PAD_GU };
   }
   const maxD = Math.max(...holes.map(h => Math.hypot(h.x, h.y)));
   return { x: maxD + 1.1, y: 0 };
@@ -702,6 +737,13 @@ function GroundGlyph({ size = 18 }) {
   );
 }
 
+function simWorldHole(part, holeIdx) {
+  const lh = getLocalHoles(part)[holeIdx];
+  if (!lh) return { x: part.x, y: part.y };
+  const r = rotate(lh, part.rotation);
+  return { x: part.x + r.x, y: part.y + r.y };
+}
+
 // ---------- Simulation ----------
 
 function buildConstraintMap(parts, joints) {
@@ -712,21 +754,24 @@ function buildConstraintMap(parts, joints) {
       const part = parts.find(p => p.id === partId);
       if (!part) continue;
       const wh = worldHoles(part);
-      let bestIdx = -1, bestDist = 0.4;
+      const threshold = joint.kind === "ground" ? 0.9 : 0.4;
+      let bestIdx = -1, bestDist = threshold;
       for (let i = 0; i < wh.length; i++) {
         const d = Math.hypot(wh[i].x - joint.x, wh[i].y - joint.y);
         if (d < bestDist) { bestDist = d; bestIdx = i; }
       }
       if (bestIdx >= 0) {
+        // If it's a slotted strip and NOT an end hole, it's a sliding constraint
         const isSlot = part.type === "slottedStrip" && bestIdx > 0 && bestIdx < part.size - 1;
         entries.push({ partId, holeIdx: bestIdx, isSlot });
       } else if (part.type === "slottedStrip") {
-        // Joint was placed on the slot body axis (not at a discrete hole) — still a slot constraint
+        // Axis-based detection: allow pinning ANYWHERE on the slot rail
         const θr = part.rotation * Math.PI / 180;
         const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
         const relX = joint.x - part.x, relY = joint.y - part.y;
         const along = relX * cosθ + relY * sinθ;
         const perp = Math.abs(-relX * sinθ + relY * cosθ);
+        // If it's along the bar and within a reasonable "thickness"
         if (along >= 0.4 && along <= part.size - 1.4 && perp < 0.6) {
           entries.push({ partId, holeIdx: 0, isSlot: true });
         }
@@ -735,649 +780,6 @@ function buildConstraintMap(parts, joints) {
     map.set(joint.id, entries);
   }
   return map;
-}
-
-// Union-find welded parts into clusters. Each cluster has a root part; every
-// other member is frozen to the root via a (localOff, relRot) transform computed
-// from the initial poses. The solver then treats each cluster as a single rigid
-// body, eliminating the per-weld tug-of-war that caused drift in large blobs.
-function buildClusters(parts, joints) {
-  const parent = new Map();
-  for (const p of parts) parent.set(p.id, p.id);
-  const find = (x) => {
-    let r = x;
-    while (parent.get(r) !== r) r = parent.get(r);
-    while (parent.get(x) !== r) { const n = parent.get(x); parent.set(x, r); x = n; }
-    return r;
-  };
-  for (const j of joints) {
-    if (j.kind !== "weld" || j.partIds.length < 2) continue;
-    const [a, b] = j.partIds;
-    if (!parent.has(a) || !parent.has(b)) continue;
-    const ra = find(a), rb = find(b);
-    if (ra !== rb) parent.set(ra, rb);
-  }
-  const groups = new Map();
-  for (const p of parts) {
-    const r = find(p.id);
-    if (!groups.has(r)) groups.set(r, []);
-    groups.get(r).push(p.id);
-  }
-  const rootOf = new Map();
-  const membersOf = new Map();
-  const slaveTransforms = [];
-  for (const [rootId, memberIds] of groups) {
-    const rootPart = parts.find(p => p.id === rootId);
-    if (!rootPart) continue;
-    const ang = -rootPart.rotation * Math.PI / 180;
-    const cosA = Math.cos(ang), sinA = Math.sin(ang);
-    const members = [];
-    for (const mId of memberIds) {
-      rootOf.set(mId, rootId);
-      if (mId === rootId) {
-        members.push({ partId: rootId, localOffX: 0, localOffY: 0, relRotDeg: 0 });
-        continue;
-      }
-      const mPart = parts.find(p => p.id === mId);
-      if (!mPart) continue;
-      const wx = mPart.x - rootPart.x, wy = mPart.y - rootPart.y;
-      const localOffX = wx * cosA - wy * sinA;
-      const localOffY = wx * sinA + wy * cosA;
-      const relRotDeg = mPart.rotation - rootPart.rotation;
-      members.push({ partId: mId, localOffX, localOffY, relRotDeg });
-      slaveTransforms.push({ partIdA: rootId, partIdB: mId, localOffX, localOffY, relRotDeg });
-    }
-    membersOf.set(rootId, members);
-  }
-  return { rootOf, membersOf, slaveTransforms };
-}
-
-// Hole position of a member expressed in its cluster root's local frame.
-function clusterEffectiveLocal(memberPart, memberXform, holeIdx) {
-  const lh = getLocalHoles(memberPart)[holeIdx];
-  if (!lh) return null;
-  const r = rotate(lh, memberXform.relRotDeg);
-  return { x: r.x + memberXform.localOffX, y: r.y + memberXform.localOffY };
-}
-
-// World hole position computed via the cluster root pose.
-function clusterWorldHole(rootPart, effLocal) {
-  if (!effLocal) return { x: rootPart.x, y: rootPart.y };
-  const r = rotate(effLocal, rootPart.rotation);
-  return { x: rootPart.x + r.x, y: rootPart.y + r.y };
-}
-
-function memberXformOf(clusters, partId) {
-  const rId = clusters.rootOf.get(partId);
-  if (rId == null) return null;
-  const ms = clusters.membersOf.get(rId);
-  return ms ? ms.find(m => m.partId === partId) : null;
-}
-
-function memberEffLocal(clusters, parts, partId, holeIdx) {
-  const member = parts.find(p => p.id === partId);
-  const xf = memberXformOf(clusters, partId);
-  if (!member || !xf) return null;
-  return clusterEffectiveLocal(member, xf, holeIdx);
-}
-
-function memberWorldHole(clusters, parts, partId, holeIdx) {
-  const rId = clusters.rootOf.get(partId);
-  const root = parts.find(p => p.id === rId);
-  const eff = memberEffLocal(clusters, parts, partId, holeIdx);
-  if (!root || !eff) return simWorldHole(parts.find(p => p.id === partId), holeIdx);
-  return clusterWorldHole(root, eff);
-}
-
-// Angular-impulse constraint with a precomputed local (root-frame) offset.
-function applyPositionConstraintLocal(part, effLocal, targetX, targetY) {
-  if (!effLocal) return part;
-  const r = rotate(effLocal, part.rotation);
-  const ex = targetX - (part.x + r.x);
-  const ey = targetY - (part.y + r.y);
-  if (Math.abs(ex) < 1e-9 && Math.abs(ey) < 1e-9) return part;
-  const rSq = r.x * r.x + r.y * r.y;
-  const dθRad = rSq > 0.001 ? (r.x * ey - r.y * ex) / rSq : 0;
-  const newRotDeg = part.rotation + dθRad * 180 / Math.PI;
-  const newR = rotate(effLocal, newRotDeg);
-  return { ...part, rotation: newRotDeg, x: targetX - newR.x, y: targetY - newR.y };
-}
-
-// Two-point exact solve (ground anchor + pivot target) using local offsets.
-function solveGroundedPartLocal(part, gLocal, groundX, groundY, pLocal, pivotTX, pivotTY) {
-  if (!gLocal || !pLocal) return part;
-  const dLocal = { x: pLocal.x - gLocal.x, y: pLocal.y - gLocal.y };
-  if (Math.hypot(dLocal.x, dLocal.y) < 0.01) return part;
-  const dWorld = { x: pivotTX - groundX, y: pivotTY - groundY };
-  const newRotRad = Math.atan2(dWorld.y, dWorld.x) - Math.atan2(dLocal.y, dLocal.x);
-  const newRotDeg = newRotRad * 180 / Math.PI;
-  const rG = rotate(gLocal, newRotDeg);
-  return { ...part, rotation: newRotDeg, x: groundX - rG.x, y: groundY - rG.y };
-}
-
-// Re-slave every non-root cluster member from its root's current pose.
-function slaveClusterMembers(parts, clusters) {
-  for (const [rootId, members] of clusters.membersOf) {
-    const rIdx = parts.findIndex(p => p.id === rootId);
-    if (rIdx < 0) continue;
-    const root = parts[rIdx];
-    for (const m of members) {
-      if (m.partId === rootId) continue;
-      const mIdx = parts.findIndex(p => p.id === m.partId);
-      if (mIdx < 0) continue;
-      const off = rotate({ x: m.localOffX, y: m.localOffY }, root.rotation);
-      parts[mIdx] = { ...parts[mIdx], x: root.x + off.x, y: root.y + off.y, rotation: root.rotation + m.relRotDeg };
-    }
-  }
-}
-
-function simWorldHole(part, holeIdx) {
-  const lh = getLocalHoles(part)[holeIdx];
-  if (!lh) return { x: part.x, y: part.y };
-  const r = rotate(lh, part.rotation);
-  return { x: part.x + r.x, y: part.y + r.y };
-}
-
-// Apply a single positional constraint to a rigid body:
-// moves and rotates the part so that its `holeIdx` ends up exactly at (targetX, targetY).
-// Uses the angular-impulse formula so the rotation is correct for the rigid body.
-function applyPositionConstraint(part, holeIdx, targetX, targetY) {
-  const lh = getLocalHoles(part)[holeIdx];
-  if (!lh) return part;
-  const r = rotate(lh, part.rotation);             // radius vector (center → hole) in world space
-  const ex = targetX - (part.x + r.x);
-  const ey = targetY - (part.y + r.y);
-  if (Math.abs(ex) < 1e-9 && Math.abs(ey) < 1e-9) return part;
-  // Angular correction: dθ = (r × e) / |r|²
-  const rSq = r.x * r.x + r.y * r.y;
-  const dθRad = rSq > 0.001 ? (r.x * ey - r.y * ex) / rSq : 0;
-  const newRotDeg = part.rotation + dθRad * 180 / Math.PI;
-  // After rotation, re-pin via translation so the hole is exactly at target
-  const newR = rotate(lh, newRotDeg);
-  return { ...part, rotation: newRotDeg, x: targetX - newR.x, y: targetY - newR.y };
-}
-
-const SOLVER_ITERATIONS = 60;
-
-// Returns the two intersection points of circle(ax,ay,ra) and circle(bx,by,rb), or null if none.
-function circleCircleIntersect(ax, ay, ra, bx, by, rb) {
-  const dx = bx - ax, dy = by - ay;
-  const d = Math.hypot(dx, dy);
-  if (d > ra + rb + 0.01 || d < Math.abs(ra - rb) - 0.01 || d < 1e-9) return null;
-  const a = (ra * ra - rb * rb + d * d) / (2 * d);
-  const h = Math.sqrt(Math.max(0, ra * ra - a * a));
-  const mx = ax + a * dx / d, my = ay + a * dy / d;
-  return [
-    { x: mx + h * dy / d, y: my - h * dx / d },
-    { x: mx - h * dy / d, y: my + h * dx / d },
-  ];
-}
-
-// General kinematic solver: walks motor-driven chains of arbitrary depth,
-// then cascades through solved grounded intermediates to propagate further.
-function solveKinematicChains(parts, joints, constraintMap, groundByRoot, fullyFixedRoots, clusters) {
-  const solvedRoots = new Set();
-  const solvedIds = new Set();
-
-  const closestTo = (sols, ref) => {
-    if (!ref) return sols[0];
-    const d0 = Math.hypot(sols[0].x - ref.x, sols[0].y - ref.y);
-    const d1 = Math.hypot(sols[1].x - ref.x, sols[1].y - ref.y);
-    return d0 <= d1 ? sols[0] : sols[1];
-  };
-
-  // Enrich every non-ground joint entry with its cluster root and root-local hole.
-  // Joints entirely internal to a single cluster are skipped (the weld is the constraint).
-  const pivotsByRoot = new Map();
-  for (const j of joints) {
-    if (j.kind === "ground") continue;
-    const cm = constraintMap.get(j.id);
-    if (!cm || cm.length < 2) continue;
-    const enriched = cm.map(e => {
-      const rId = clusters.rootOf.get(e.partId);
-      if (rId == null) return null;
-      const effLocal = memberEffLocal(clusters, parts, e.partId, e.holeIdx);
-      return effLocal ? { ...e, rootId: rId, effLocal } : null;
-    });
-    if (enriched.some(x => x === null)) continue;
-    const uniqueRoots = new Set(enriched.map(x => x.rootId));
-    if (uniqueRoots.size < 2) continue; // internal to a cluster
-    for (const en of enriched) {
-      if (!pivotsByRoot.has(en.rootId)) pivotsByRoot.set(en.rootId, []);
-      pivotsByRoot.get(en.rootId).push({ joint: j, ownEntry: en, enriched });
-    }
-  }
-
-  const commitRoot = (rootId) => {
-    if (solvedRoots.has(rootId)) return;
-    solvedRoots.add(rootId);
-    for (const m of clusters.membersOf.get(rootId) || []) solvedIds.add(m.partId);
-  };
-
-  const sameLocal = (a, b) =>
-    a && b && Math.abs(a.x - b.x) < 1e-3 && Math.abs(a.y - b.y) < 1e-3;
-
-  // Walk a chain of cluster roots from (startRootId, inEffLocal) driven by world point A.
-  // Stops at a grounded (but not fully-fixed) terminal.
-  function trySolveChain(startRootId, startInLocal, A, visitedRoots) {
-    const chain = []; // [{ rootId, inEffLocal, outEffLocal, terminal?, gx?, gy? }]
-    let curRoot = startRootId;
-    let curInLocal = startInLocal;
-    const visited = new Set(visitedRoots);
-    visited.add(curRoot);
-
-    for (let depth = 0; depth < 12; depth++) {
-      if (groundByRoot.has(curRoot)) {
-        if (fullyFixedRoots.has(curRoot)) return false;
-        const g = groundByRoot.get(curRoot);
-        chain.push({ rootId: curRoot, inEffLocal: curInLocal, outEffLocal: g.effLocal, terminal: true, gx: g.x, gy: g.y });
-        break;
-      }
-      let advanced = false;
-      for (const { ownEntry, enriched } of (pivotsByRoot.get(curRoot) || [])) {
-        if (sameLocal(ownEntry.effLocal, curInLocal)) continue;
-        const other = enriched.find(x => x.rootId !== curRoot && !visited.has(x.rootId));
-        if (!other) continue;
-        chain.push({ rootId: curRoot, inEffLocal: curInLocal, outEffLocal: ownEntry.effLocal });
-        visited.add(other.rootId);
-        curRoot = other.rootId;
-        curInLocal = other.effLocal;
-        advanced = true;
-        break;
-      }
-      if (!advanced) break;
-    }
-
-    const n = chain.length;
-    if (n === 0 || !chain[n - 1].terminal) return false;
-
-    const G = { x: chain[n - 1].gx, y: chain[n - 1].gy };
-    // Link length = distance between inEffLocal and outEffLocal in cluster root-local frame
-    // (equals world distance because it's a rigid-body metric).
-    const L = chain.map(cp => {
-      if (!cp.inEffLocal) return 0; // only possible for link 0 if driving point coincides with root origin
-      return Math.hypot(cp.outEffLocal.x - cp.inEffLocal.x, cp.outEffLocal.y - cp.inEffLocal.y);
-    });
-    const K = [];
-    for (let i = 0; i < n - 1; i++) {
-      const rp = parts.find(p => p.id === chain[i].rootId);
-      K.push(clusterWorldHole(rp, chain[i].outEffLocal));
-    }
-
-    if (n === 1) {
-      const idx = parts.findIndex(p => p.id === chain[0].rootId);
-      if (idx < 0) return false;
-      parts[idx] = solveGroundedPartLocal(parts[idx], chain[0].outEffLocal, G.x, G.y, chain[0].inEffLocal, A.x, A.y);
-      commitRoot(chain[0].rootId);
-      return true;
-    }
-
-    if (n === 2) {
-      const sols = circleCircleIntersect(A.x, A.y, L[0], G.x, G.y, L[1]);
-      if (!sols) return false;
-      K[0] = closestTo(sols, K[0]);
-    } else {
-      let ok = true;
-      for (let it = 0; it < 24; it++) {
-        for (let i = 0; i < n - 1; i++) {
-          const prev = i === 0 ? A : K[i - 1];
-          const next = i === n - 2 ? G : K[i + 1];
-          const sols = circleCircleIntersect(prev.x, prev.y, L[i], next.x, next.y, L[i + 1]);
-          if (!sols) { ok = false; break; }
-          K[i] = closestTo(sols, K[i]);
-        }
-        if (!ok) break;
-      }
-      if (!ok) return false;
-    }
-
-    const pivots = [A, ...K, G];
-    for (let i = 0; i < n; i++) {
-      const cp = chain[i];
-      const idx = parts.findIndex(p => p.id === cp.rootId);
-      if (idx < 0) continue;
-      const pIn = pivots[i], pOut = pivots[i + 1];
-      parts[idx] = i < n - 1
-        ? solveGroundedPartLocal(parts[idx], cp.inEffLocal, pIn.x, pIn.y, cp.outEffLocal, pOut.x, pOut.y)
-        : solveGroundedPartLocal(parts[idx], cp.outEffLocal, G.x, G.y, cp.inEffLocal, pIn.x, pIn.y);
-      commitRoot(cp.rootId);
-    }
-    return true;
-  }
-
-  // Phase 1: chains driven directly by motors. A motor is always its own cluster.
-  for (const motorPart of parts) {
-    if (motorPart.type !== "motor") continue;
-    const motorRoot = clusters.rootOf.get(motorPart.id);
-    for (const { ownEntry, enriched } of (pivotsByRoot.get(motorRoot) || [])) {
-      const other = enriched.find(x => x.rootId !== motorRoot);
-      if (!other) continue;
-      const A = simWorldHole(motorPart, ownEntry.holeIdx);
-      trySolveChain(other.rootId, other.effLocal, A, [motorRoot]);
-    }
-  }
-
-  // Phase 2: cascade from solved grounded roots.
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const rId of [...solvedRoots]) {
-      if (!groundByRoot.has(rId) || fullyFixedRoots.has(rId)) continue;
-      const rootPart = parts.find(p => p.id === rId);
-      if (!rootPart) continue;
-      const g = groundByRoot.get(rId);
-      for (const { ownEntry, enriched } of (pivotsByRoot.get(rId) || [])) {
-        if (sameLocal(ownEntry.effLocal, g.effLocal)) continue;
-        const other = enriched.find(x => x.rootId !== rId && !solvedRoots.has(x.rootId));
-        if (!other) continue;
-        const A = clusterWorldHole(rootPart, ownEntry.effLocal);
-        const before = solvedRoots.size;
-        trySolveChain(other.rootId, other.effLocal, A, [rId]);
-        if (solvedRoots.size > before) changed = true;
-      }
-    }
-  }
-
-  return solvedIds;
-}
-
-// Exact one-shot solver for a part that has a ground pin AND a pivot constraint.
-// Rotates the part around its ground hole to point toward pivotTarget, then
-// translates to re-pin the ground hole. Both constraints satisfied simultaneously.
-function solveGroundedPart(part, groundHoleIdx, groundX, groundY, pivotHoleIdx, pivotTX, pivotTY) {
-  const localHoles = getLocalHoles(part);
-  const gLH = localHoles[groundHoleIdx];
-  const pLH = localHoles[pivotHoleIdx];
-  if (!gLH || !pLH) return part;
-  const dLocal = { x: pLH.x - gLH.x, y: pLH.y - gLH.y };
-  if (Math.hypot(dLocal.x, dLocal.y) < 0.01) return part;
-  const dWorld = { x: pivotTX - groundX, y: pivotTY - groundY };
-  const newRotRad = Math.atan2(dWorld.y, dWorld.x) - Math.atan2(dLocal.y, dLocal.x);
-  const newRotDeg = newRotRad * 180 / Math.PI;
-  const rG = rotate(gLH, newRotDeg);
-  return { ...part, rotation: newRotDeg, x: groundX - rG.x, y: groundY - rG.y };
-}
-
-function stepSimulation(simParts, joints, constraintMap, clusters, dt) {
-  const parts = simParts.map(p => ({ ...p }));
-
-  // Ground index, now keyed by cluster root. Each ground remembers which member-hole it pins.
-  const groundByRoot = new Map();
-  const groundsByRoot = new Map();
-  for (const joint of joints) {
-    if (joint.kind !== "ground") continue;
-    const cm = constraintMap.get(joint.id);
-    if (!cm) continue;
-    for (const entry of cm) {
-      const rId = clusters.rootOf.get(entry.partId);
-      if (rId == null) continue;
-      const effLocal = memberEffLocal(clusters, parts, entry.partId, entry.holeIdx);
-      if (!effLocal) continue;
-      const g = { x: joint.x, y: joint.y, effLocal, memberPartId: entry.partId, holeIdx: entry.holeIdx };
-      groundByRoot.set(rId, g);
-      if (!groundsByRoot.has(rId)) groundsByRoot.set(rId, []);
-      groundsByRoot.get(rId).push(g);
-    }
-  }
-
-  // Cluster is fully fixed if ≥2 of its grounds anchor distinct world points.
-  const fullyFixedRoots = new Set();
-  for (const [rId, gs] of groundsByRoot) {
-    if (gs.length < 2) continue;
-    outer: for (let i = 0; i < gs.length; i++) {
-      for (let j = i + 1; j < gs.length; j++) {
-        if (Math.hypot(gs[i].x - gs[j].x, gs[i].y - gs[j].y) > 0.01) {
-          fullyFixedRoots.add(rId);
-          break outer;
-        }
-      }
-    }
-  }
-
-  const snapFullyFixed = () => {
-    for (const rId of fullyFixedRoots) {
-      const gs = groundsByRoot.get(rId);
-      if (!gs || gs.length < 2) continue;
-      const idx = parts.findIndex(p => p.id === rId);
-      if (idx < 0) continue;
-      parts[idx] = solveGroundedPartLocal(parts[idx], gs[0].effLocal, gs[0].x, gs[0].y, gs[1].effLocal, gs[1].x, gs[1].y);
-    }
-    slaveClusterMembers(parts, clusters);
-  };
-  snapFullyFixed();
-
-  // Order joints so motor-adjacent ones run first each iteration.
-  const sortedJoints = [...joints].sort((a, b) => {
-    const motorAdjacent = (j) => j.kind !== "ground" && j.partIds.some(id => {
-      const p = parts.find(q => q.id === id);
-      return p?.type === "motor";
-    });
-    const am = motorAdjacent(a), bm = motorAdjacent(b);
-    if (am && !bm) return -1;
-    if (!am && bm) return 1;
-    if (a.kind === "ground" && b.kind !== "ground") return 1;
-    if (a.kind !== "ground" && b.kind === "ground") return -1;
-    return 0;
-  });
-
-  // Step 1: Advance motors around their own ground/anchor.
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    if (part.type !== "motor") continue;
-    const motorSpeed = (part.speed ?? MOTOR_SPEED_DEG) * (part.direction ?? 1);
-    const newRot = part.rotation + motorSpeed * dt;
-    const motorRoot = clusters.rootOf.get(part.id);
-    const g = groundByRoot.get(motorRoot);
-    let pivotX = part.x, pivotY = part.y, pivotHoleIdx = 0;
-    if (g && g.memberPartId === part.id) { pivotX = g.x; pivotY = g.y; pivotHoleIdx = g.holeIdx; }
-    const lh = getLocalHoles(part)[pivotHoleIdx] ?? { x: 0, y: 0 };
-    const r = rotate(lh, newRot);
-    parts[i] = { ...part, rotation: newRot, x: pivotX - r.x, y: pivotY - r.y };
-  }
-
-  // Step 1b: Exact analytical solve through cluster chains (motor → grounded terminals).
-  const kinematicallySolvedIds = solveKinematicChains(parts, joints, constraintMap, groundByRoot, fullyFixedRoots, clusters);
-  slaveClusterMembers(parts, clusters);
-
-  // Cluster roots that PBD must not move.
-  const motorConnectedRoots = new Set();
-  for (const j of joints) {
-    if (j.kind === "ground") continue;
-    const cm = constraintMap.get(j.id);
-    if (!cm || cm.length < 2) continue;
-    const hasMotor = cm.some(e => parts.find(p => p.id === e.partId)?.type === "motor");
-    if (hasMotor) {
-      for (const e of cm) {
-        const part = parts.find(p => p.id === e.partId);
-        if (part?.type === "motor") continue;
-        const rId = clusters.rootOf.get(e.partId);
-        if (rId != null) motorConnectedRoots.add(rId);
-      }
-    }
-  }
-  for (const id of kinematicallySolvedIds) {
-    const rId = clusters.rootOf.get(id);
-    if (rId != null) motorConnectedRoots.add(rId);
-  }
-
-  const rootOf = (id) => clusters.rootOf.get(id);
-  const rootIdxOf = (id) => parts.findIndex(p => p.id === rootOf(id));
-
-  // Step 2: PBD constraint iterations on cluster roots.
-  for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
-    for (const joint of sortedJoints) {
-      const cm = constraintMap.get(joint.id);
-      if (!cm || cm.length === 0) continue;
-
-      if (joint.kind === "ground") {
-        const entry = cm[0];
-        const rId = rootOf(entry.partId);
-        if (rId == null) continue;
-        if (fullyFixedRoots.has(rId)) continue;
-        if (motorConnectedRoots.has(rId)) continue;
-        const rIdx = parts.findIndex(p => p.id === rId);
-        if (rIdx < 0 || parts[rIdx].type === "motor") continue;
-        const effLocal = memberEffLocal(clusters, parts, entry.partId, entry.holeIdx);
-        if (!effLocal) continue;
-        const r = rotate(effLocal, parts[rIdx].rotation);
-        parts[rIdx] = { ...parts[rIdx], x: joint.x - r.x, y: joint.y - r.y };
-
-      } else if (cm.length >= 2) {
-        const [entA, entB] = cm;
-        const rA = rootOf(entA.partId), rB = rootOf(entB.partId);
-        if (rA == null || rB == null) continue;
-        if (rA === rB) continue; // internal to one cluster — weld handles it
-        const rIdxA = parts.findIndex(p => p.id === rA);
-        const rIdxB = parts.findIndex(p => p.id === rB);
-        if (rIdxA < 0 || rIdxB < 0) continue;
-
-        const aMotor = parts[rIdxA].type === "motor";
-        const bMotor = parts[rIdxB].type === "motor";
-        if (aMotor && bMotor) continue;
-
-        const effA = memberEffLocal(clusters, parts, entA.partId, entA.holeIdx);
-        const effB = memberEffLocal(clusters, parts, entB.partId, entB.holeIdx);
-        if (!effA || !effB) continue;
-
-        // Slots only supported when the slot strip is its own singleton cluster.
-        if (entA.isSlot || entB.isSlot) {
-          const [slotEntry, slotIdxP, otherEntry, otherIdxP, slotRoot, otherRoot] = entA.isSlot
-            ? [entA, parts.findIndex(p => p.id === entA.partId), entB, parts.findIndex(p => p.id === entB.partId), rA, rB]
-            : [entB, parts.findIndex(p => p.id === entB.partId), entA, parts.findIndex(p => p.id === entA.partId), rB, rA];
-          if (slotIdxP < 0 || otherIdxP < 0) continue;
-          if (slotEntry.partId !== slotRoot) continue; // slot in a welded cluster: skip gracefully
-          const S = parts[slotIdxP];
-          const θr = S.rotation * Math.PI / 180;
-          const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
-          const whOther = memberWorldHole(clusters, parts, otherEntry.partId, otherEntry.holeIdx);
-          const relX = whOther.x - S.x, relY = whOther.y - S.y;
-          const s = relX * cosθ + relY * sinθ;
-          const e = -relX * sinθ + relY * cosθ;
-          const sFixed = S.type === "motor" || fullyFixedRoots.has(slotRoot) || motorConnectedRoots.has(slotRoot);
-          if (!sFixed) {
-            if (groundByRoot.has(slotRoot)) {
-              const gS = groundByRoot.get(slotRoot);
-              const gLH = getLocalHoles(S)[gS.holeIdx];
-              const dLen = Math.hypot(whOther.x - gS.x, whOther.y - gS.y);
-              if (gLH && dLen > 0.01) {
-                const newRotRad = Math.atan2(whOther.y - gS.y, whOther.x - gS.x) + (s < gLH.x ? Math.PI : 0);
-                const newRotDeg = newRotRad * 180 / Math.PI;
-                const rG = rotate(gLH, newRotDeg);
-                parts[slotIdxP] = { ...S, rotation: newRotDeg, x: gS.x - rG.x, y: gS.y - rG.y };
-              }
-            } else {
-              parts[slotIdxP] = { ...S, x: S.x - e * sinθ, y: S.y + e * cosθ };
-            }
-          }
-          const S2 = parts[slotIdxP];
-          const θr2 = S2.rotation * Math.PI / 180;
-          const cosθ2 = Math.cos(θr2), sinθ2 = Math.sin(θr2);
-          const relX2 = whOther.x - S2.x, relY2 = whOther.y - S2.y;
-          const s2 = relX2 * cosθ2 + relY2 * sinθ2;
-          const projX2 = S2.x + s2 * cosθ2, projY2 = S2.y + s2 * sinθ2;
-          if (parts[rootIdxOf(otherEntry.partId)].type !== "motor" && !motorConnectedRoots.has(otherRoot)) {
-            const oRIdx = rootIdxOf(otherEntry.partId);
-            const gO = groundByRoot.get(otherRoot);
-            const effO = memberEffLocal(clusters, parts, otherEntry.partId, otherEntry.holeIdx);
-            parts[oRIdx] = gO
-              ? solveGroundedPartLocal(parts[oRIdx], gO.effLocal, gO.x, gO.y, effO, projX2, projY2)
-              : applyPositionConstraintLocal(parts[oRIdx], effO, projX2, projY2);
-          }
-        } else {
-          const whA = clusterWorldHole(parts[rIdxA], effA);
-          const whB = clusterWorldHole(parts[rIdxB], effB);
-          const aGrounded = groundByRoot.has(rA);
-          const bGrounded = groundByRoot.has(rB);
-          const gA = groundByRoot.get(rA);
-          const gB = groundByRoot.get(rB);
-
-          if (aMotor) {
-            if (!motorConnectedRoots.has(rB)) {
-              parts[rIdxB] = gB
-                ? solveGroundedPartLocal(parts[rIdxB], gB.effLocal, gB.x, gB.y, effB, whA.x, whA.y)
-                : applyPositionConstraintLocal(parts[rIdxB], effB, whA.x, whA.y);
-            }
-          } else if (bMotor) {
-            if (!motorConnectedRoots.has(rA)) {
-              parts[rIdxA] = gA
-                ? solveGroundedPartLocal(parts[rIdxA], gA.effLocal, gA.x, gA.y, effA, whB.x, whB.y)
-                : applyPositionConstraintLocal(parts[rIdxA], effA, whB.x, whB.y);
-            }
-          } else if (bGrounded && !aGrounded) {
-            if (!motorConnectedRoots.has(rB)) {
-              parts[rIdxB] = solveGroundedPartLocal(parts[rIdxB], gB.effLocal, gB.x, gB.y, effB, whA.x, whA.y);
-            }
-            if (!motorConnectedRoots.has(rA)) {
-              const newWhB = clusterWorldHole(parts[rIdxB], effB);
-              parts[rIdxA] = applyPositionConstraintLocal(parts[rIdxA], effA, newWhB.x, newWhB.y);
-            }
-          } else if (aGrounded && !bGrounded) {
-            if (!motorConnectedRoots.has(rA)) {
-              parts[rIdxA] = solveGroundedPartLocal(parts[rIdxA], gA.effLocal, gA.x, gA.y, effA, whB.x, whB.y);
-            }
-            if (!motorConnectedRoots.has(rB)) {
-              const newWhA = clusterWorldHole(parts[rIdxA], effA);
-              parts[rIdxB] = applyPositionConstraintLocal(parts[rIdxB], effB, newWhA.x, newWhA.y);
-            }
-          } else if (aGrounded && bGrounded) {
-            const radA = Math.hypot(effA.x - gA.effLocal.x, effA.y - gA.effLocal.y);
-            const radB = Math.hypot(effB.x - gB.effLocal.x, effB.y - gB.effLocal.y);
-            const sols = circleCircleIntersect(gA.x, gA.y, radA, gB.x, gB.y, radB);
-            if (sols) {
-              const d0 = Math.hypot(sols[0].x - whA.x, sols[0].y - whA.y);
-              const d1 = Math.hypot(sols[1].x - whA.x, sols[1].y - whA.y);
-              const tgt = d0 <= d1 ? sols[0] : sols[1];
-              if (!motorConnectedRoots.has(rA)) parts[rIdxA] = solveGroundedPartLocal(parts[rIdxA], gA.effLocal, gA.x, gA.y, effA, tgt.x, tgt.y);
-              if (!motorConnectedRoots.has(rB)) parts[rIdxB] = solveGroundedPartLocal(parts[rIdxB], gB.effLocal, gB.x, gB.y, effB, tgt.x, tgt.y);
-            }
-          } else {
-            const aMC = motorConnectedRoots.has(rA);
-            const bMC = motorConnectedRoots.has(rB);
-            if (aMC && !bMC) {
-              parts[rIdxB] = applyPositionConstraintLocal(parts[rIdxB], effB, whA.x, whA.y);
-            } else if (bMC && !aMC) {
-              parts[rIdxA] = applyPositionConstraintLocal(parts[rIdxA], effA, whB.x, whB.y);
-            } else if (!aMC && !bMC) {
-              const tX = (whA.x + whB.x) / 2;
-              const tY = (whA.y + whB.y) / 2;
-              parts[rIdxA] = applyPositionConstraintLocal(parts[rIdxA], effA, tX, tY);
-              parts[rIdxB] = applyPositionConstraintLocal(parts[rIdxB], effB, tX, tY);
-            }
-          }
-        }
-      }
-    }
-
-    // Propagate root updates to all cluster members — single pass per iteration,
-    // replacing the per-weld teleport cascade.
-    slaveClusterMembers(parts, clusters);
-  }
-
-  snapFullyFixed();
-
-  // Jam detection: residual gap on any motor-driven pivot.
-  let jammed = false;
-  for (const joint of joints) {
-    if (joint.kind === "ground") continue;
-    const cm = constraintMap.get(joint.id);
-    if (!cm || cm.length < 2) continue;
-    const [entA, entB] = cm;
-    const rA = rootOf(entA.partId), rB = rootOf(entB.partId);
-    if (rA === rB) continue;
-    const either = motorConnectedRoots.has(rA) || motorConnectedRoots.has(rB);
-    if (!either) continue;
-    const whA = memberWorldHole(clusters, parts, entA.partId, entA.holeIdx);
-    const whB = memberWorldHole(clusters, parts, entB.partId, entB.holeIdx);
-    if (whA && whB && Math.hypot(whA.x - whB.x, whA.y - whB.y) > 0.5) {
-      jammed = true;
-      break;
-    }
-  }
-
-  if (jammed) {
-    return { parts: simParts.map(p => ({ ...p })), jammed: true };
-  }
-  return { parts, jammed: false };
 }
 
 // ---------- Main component ----------
@@ -1405,6 +807,7 @@ export default function ZineMachine() {
 
   // Simulation state
   const [simParts, setSimParts] = useState(null);
+  const [simCM, setSimCM] = useState(null);
   const [simPaused, setSimPaused] = useState(false);
   const [simJammed, setSimJammed] = useState(false);
   const [selRect, setSelRect] = useState(null);       // { x1,y1,x2,y2 } grid coords
@@ -1412,6 +815,7 @@ export default function ZineMachine() {
   const multiSelectedIdsRef = useRef(new Set());
   useEffect(() => { multiSelectedIdsRef.current = multiSelectedIds; }, [multiSelectedIds]);
   const [handleZone, setHandleZone] = useState(null); // null | 'scale' | 'rotate'
+  const [dropGhost, setDropGhost] = useState(null);   // origPart of last moved strip, shown as ghost at origin
   const simRef = useRef(null);
   const rafRef = useRef(null);
   const lastTimeRef = useRef(null);
@@ -1420,7 +824,9 @@ export default function ZineMachine() {
   const stampWeldRef = useRef(null); // { partId, holeIdx } set during stamp drag, applied on drop
 
   useEffect(() => { pausedRef.current = simPaused; }, [simPaused]);
-  useEffect(() => { setHandleZone(null); }, [st.selectedId]);
+  useEffect(() => { 
+    setHandleZone(hz => hz === null ? null : null); 
+  }, [st.selectedId]);
 
   // Auto-save to localStorage on every design change
   useEffect(() => {
@@ -1433,25 +839,46 @@ export default function ZineMachine() {
     if (st.mode !== "play") {
       if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
       lastTimeRef.current = null;
-      setSimParts(null);
-      setSimPaused(false);
-      setSimJammed(false);
+      // We wrap these in a check to avoid redundant setStates if already null/false
+      setSimParts(p => p === null ? null : null);
+      setSimCM(c => c === null ? null : null);
+      setSimPaused(v => !v ? false : false);
+      setSimJammed(v => !v ? false : false);
       triggeredBellsRef.current.clear();
       return;
     }
+
     const initParts = st.parts.map(p => ({ ...p }));
     const initJoints = [...st.joints];
     const cm = buildConstraintMap(initParts, initJoints);
     let cur = initParts;
-    let rapier = null; // set once async build resolves
+    let rapier = null;
+
+    // Use a small delay or a check to prevent cascading render error if necessary,
+    // though for simple initialization it's usually okay.
+    setSimCM(cm);
+    setSimParts(initParts);
+
+    // Initialize global diagnostic logs
+    window._zineLogs = [];
+    window._simFrame = 0;
+    window._lastMaxError = 0;
+    window._rapierStatus = "BUILDING";
 
     simRef.current = { constraintMap: cm, joints: initJoints, getCur: () => cur };
     lastTimeRef.current = null;
 
-    // Build Rapier world asynchronously; RAF loop runs once it's ready
+    // Initialize the refactored Rapier world
     buildRapierSim(initParts, initJoints, cm, getLocalHoles, worldHoles)
-      .then(r => { rapier = r; })
-      .catch(err => console.error("[rapier] build failed:", err));
+      .then(r => { 
+        rapier = r; 
+        window._rapierStatus = "READY";
+        console.log("[sim] Rapier Ready");
+      })
+      .catch(err => {
+        window._rapierStatus = "FAILED";
+        console.error("[rapier] Refactor build failed:", err);
+      });
 
     const loop = (time) => {
       try {
@@ -1464,18 +891,27 @@ export default function ZineMachine() {
         const dt = Math.min((time - lastTimeRef.current) / 1000, 0.05);
         lastTimeRef.current = time;
 
-        let nextParts, jammed;
         if (rapier) {
-          rapier.step(dt);
-          nextParts = rapier.readParts(cur);
-          jammed = false;
+          rapier.step(dt, window._simFrame || 0);
+          cur = rapier.readParts(cur);
+
+          // Update frame counter and populate the global diagnostic log
+          window._simFrame = (window._simFrame || 0) + 1;
+          
+          if (window._zineLogs) {
+            const diag = rapier.getDiagnostics();
+            window._zineLogs.push({
+              frame: window._simFrame,
+              ...diag
+            });
+            // Keep logs to a reasonable size
+            if (window._zineLogs.length > 1000) window._zineLogs.shift();
+          }
         } else {
-          // Rapier not ready yet — hold still
-          nextParts = cur;
-          jammed = false;
+           // Still waiting or failed
         }
-        cur = nextParts;
-        // Weld stamps to their host part holes
+
+        // Weld stamps to their host part holes (Purely visual/UI feature)
         cur = cur.map(stamp => {
           if (stamp.type !== "stamp" || !stamp.weldedTo) return stamp;
           const host = cur.find(p => p.id === stamp.weldedTo.partId);
@@ -1485,11 +921,10 @@ export default function ZineMachine() {
           const rotOffset = stamp.weldedTo.rotationOffset ?? 0;
           return { ...stamp, x: wh.x, y: wh.y, rotation: (host.rotation || 0) + rotOffset };
         });
-        setSimJammed(jammed);
+
         // Bell collision detection
-        const bellParts = initParts.filter(p => p.type === "bell");
+        const bellParts = cur.filter(p => p.type === "bell");
         for (const bell of bellParts) {
-          // Bell body center is 0.36 grid units above pivot in bell-local space
           const bellRad = (bell.rotation || 0) * Math.PI / 180;
           const bellCx = bell.x + 0.36 * Math.sin(bellRad);
           const bellCy = bell.y - 0.36 * Math.cos(bellRad);
@@ -1516,32 +951,10 @@ export default function ZineMachine() {
           }
         }
 
-        // Simple joint distance logging with part info
-        if (window._zineLogs === undefined) window._zineLogs = [];
-        const logFrame = { frame: window._zineLogs.length, joints: [] };
-        for (const joint of initJoints) {
-          const entries = cm.get(joint.id);
-          if (!entries || entries.length < 2) continue;
-          const [entA, entB] = entries;
-          const pA = cur.find(p => p.id === entA.partId);
-          const pB = cur.find(p => p.id === entB.partId);
-          if (!pA || !pB) continue;
-          const whA = simWorldHole(pA, entA.holeIdx);
-          const whB = simWorldHole(pB, entB.holeIdx);
-          const dist = Math.hypot(whA.x - whB.x, whA.y - whB.y);
-          logFrame.joints.push({
-            id: joint.id,
-            parts: [entA.partId, entB.partId],
-            partTypes: [pA.type, pB.type],
-            distance: Number(dist.toFixed(4))
-          });
-        }
-        window._zineLogs.push(logFrame);
-
         setSimParts([...cur]);
         rafRef.current = requestAnimationFrame(loop);
       } catch (err) {
-        console.error("[sim] crash:", err);
+        console.error("[sim] Refactor loop crash:", err);
       }
     };
     rafRef.current = requestAnimationFrame(loop);
@@ -1642,9 +1055,9 @@ export default function ZineMachine() {
       setElastic(prev => prev ? { ...prev, current: { x: g.x, y: g.y } } : null);
     }
 
-    // When placing, snap hover to nearby part holes too
+    // When placing or grounding, snap hover to nearby part holes too
     let holePos = snapToBoard(g.x, g.y);
-    if (st.tool === "place" && st.parts.length > 0) {
+    if ((st.tool === "place" || st.tool === "ground") && st.parts.length > 0) {
       let bestDist = 0.9;
       for (const other of st.parts) {
         for (const th of worldHoles(other)) {
@@ -1786,18 +1199,27 @@ export default function ZineMachine() {
         dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { rotation: snap(rawDeg) } });
       }
     } else if (drag.kind === "resize") {
-      const { pivotWorld, axisDir, pivotIdx } = drag;
+      const { pivotWorld, axisDir, anchorIdx } = drag;
       const dx = g.x - pivotWorld.x;
       const dy = g.y - pivotWorld.y;
       const projected = dx * axisDir.x + dy * axisDir.y;
       const newSize = Math.max(2, Math.round(projected) + 1);
       const rotRad = drag.origPart.rotation * Math.PI / 180;
-      // When pivot is the "last hole" end (pivotIdx !== 0), part.x = hole[0] position must slide
-      // as size changes so hole[newSize-1] stays at pivotWorld, not hole[pivotIdx].
-      const anchorOffset = pivotIdx === 0 ? 0 : newSize - 1;
+      
+      // The anchor end (anchorIdx) must remain at pivotWorld position.
+      const anchorOffset = anchorIdx === 0 ? 0 : newSize - 1;
       const newX = pivotWorld.x - Math.cos(rotRad) * anchorOffset;
       const newY = pivotWorld.y - Math.sin(rotRad) * anchorOffset;
-      dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { size: newSize, x: newX, y: newY } });
+      
+      // CRITICAL: Update pivotHoleIdx to stay at the extreme opposite end of the handle
+      const newPivotIdx = anchorIdx === 0 ? 0 : newSize - 1;
+      
+      dispatch({ type: "UPDATE_PART_LIVE", id: drag.id, updates: { 
+        size: newSize, 
+        x: newX, 
+        y: newY,
+        pivotHoleIdx: newPivotIdx 
+      } });
     }
   };
 
@@ -1809,14 +1231,14 @@ export default function ZineMachine() {
         ? (g ? snapToBoard(g.x, g.y) : { x: jointDrag.origX, y: jointDrag.origY })
         : (jointSnap ?? { x: jointDrag.origX, y: jointDrag.origY }); // pivot/weld: revert to origin if not on a part hole
       const partsHere = st.parts.filter(p => {
-        if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.6)) return true;
+        if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.7)) return true;
         if (p.type === "slottedStrip") {
           const θr = p.rotation * Math.PI / 180;
           const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
           const relX = pos.x - p.x, relY = pos.y - p.y;
           const along = relX * cosθ + relY * sinθ;
           const perp = Math.abs(-relX * sinθ + relY * cosθ);
-          if (along >= 0.4 && along <= p.size - 1.4 && perp < 0.6) return true;
+          if (along >= 0.4 && along <= p.size - 1.4 && perp < 0.7) return true;
         }
         return false;
       });
@@ -1851,6 +1273,10 @@ export default function ZineMachine() {
       dispatch({ type: "UPDATE_PART", id: drag.id, updates: { weldedTo: weldData } });
       stampWeldRef.current = null;
     }
+    if (drag?.kind === "resize") {
+      const p = st.parts.find(pp => pp.id === drag.id);
+    }
+    setDropGhost(null);
     setDrag(null);
     setSnapHint(null);
   };
@@ -1911,10 +1337,10 @@ export default function ZineMachine() {
     }
     if (["pivot", "weld", "ground"].includes(st.tool)) {
       const g = pointerToGrid(e); if (!g) return;
-      const pos = st.tool === "ground" ? snapToBoard(g.x, g.y) : jointSnap;
+      const pos = st.tool === "ground" ? (hoverHole ?? snapToBoard(g.x, g.y)) : jointSnap;
       if (!pos) return; // pivot/weld must land on a part hole
       const partsHere = st.parts.filter(p => {
-        if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.6)) return true;
+        if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.7)) return true;
         // For slotted strips, also match if pos is along the slot axis
         if (p.type === "slottedStrip") {
           const θr = p.rotation * Math.PI / 180;
@@ -1922,7 +1348,7 @@ export default function ZineMachine() {
           const relX = pos.x - p.x, relY = pos.y - p.y;
           const along = relX * cosθ + relY * sinθ;
           const perp = Math.abs(-relX * sinθ + relY * cosθ);
-          if (along >= 0.4 && along <= p.size - 1.4 && perp < 0.6) return true;
+          if (along >= 0.4 && along <= p.size - 1.4 && perp < 0.7) return true;
         }
         return false;
       });
@@ -1933,7 +1359,6 @@ export default function ZineMachine() {
         for (const wh of worldHoles(p)) {
           if (Math.hypot(wh.x - pos.x, wh.y - pos.y) < 0.7) { snappedPos = wh; break; }
         }
-        break;
       }
       dispatch({
         type: "ADD_JOINT",
@@ -1963,6 +1388,7 @@ export default function ZineMachine() {
       dispatch({ type: "SELECT", id: null });
       setSelectedJointId(null);
       setMultiSelectedIds(new Set());
+      setDropGhost(null);
       if (st.tool === "select") {
         const g2 = pointerToGrid(e);
         if (g2) setSelRect({ x1: g2.x, y1: g2.y, x2: g2.x, y2: g2.y });
@@ -2018,6 +1444,7 @@ export default function ZineMachine() {
         const d = Math.hypot(grabX - wx, grabY - wy);
         if (d < snapBest) { snapBest = d; snapHoleIdx = i; }
       });
+      if (part.type === "strip" || part.type === "slottedStrip") setDropGhost({ ...part });
       setDrag({
         kind: "move",
         id: part.id,
@@ -2067,15 +1494,24 @@ export default function ZineMachine() {
     dispatch({ type: "SELECT", id: part.id });
     dispatch({ type: "SNAPSHOT" });
 
+    const holes = getLocalHoles(part);
     const pivotIdx = part.pivotHoleIdx ?? 0;
+    
+    // Determine which end is the anchor (pivot).
+    // The handle is always at the OTHER end.
+    const distToStart = Math.abs(pivotIdx - 0);
+    const distToEnd = Math.abs(pivotIdx - (holes.length - 1));
+    const anchorIdx = distToStart < distToEnd ? 0 : holes.length - 1;
+
     const wh = worldHoles(part);
-    const pivotWorld = wh[pivotIdx] ?? { x: part.x, y: part.y };
+    const pivotWorld = wh[anchorIdx] ?? { x: part.x, y: part.y };
     const rotRad = part.rotation * Math.PI / 180;
-    // Axis direction: from pivot toward far end
-    const sign = pivotIdx === 0 ? 1 : -1;
+    
+    // axisDir: pointing from anchor toward the handle end.
+    const sign = anchorIdx === 0 ? 1 : -1;
     const axisDir = { x: Math.cos(rotRad) * sign, y: Math.sin(rotRad) * sign };
 
-    setDrag({ kind: "resize", id: part.id, origPart: { ...part }, pivotWorld, axisDir, pivotIdx });
+    setDrag({ kind: "resize", id: part.id, origPart: { ...part }, pivotWorld, axisDir, anchorIdx });
   };
 
 
@@ -2170,7 +1606,7 @@ export default function ZineMachine() {
   // Auto-show context menu only for multi-select (not single select — use right-click for that)
   useEffect(() => {
     if (st.mode !== "build" || multiSelectedIds.size < 2) {
-      if (multiSelectedIds.size < 2) setCtxMenu(null);
+      setCtxMenu(c => c === null ? null : null);
       return;
     }
 
@@ -2255,6 +1691,24 @@ export default function ZineMachine() {
 
   const jointToolActive = ["pivot", "weld", "ground"].includes(st.tool);
 
+  // Parts currently under the joint brush (for highlighting)
+  const partsAtJointIds = useMemo(() => {
+    if (!jointToolActive || !jointSnap) return new Set();
+    const pos = jointSnap;
+    return new Set(st.parts.filter(p => {
+      if (worldHoles(p).some(h => Math.hypot(h.x - pos.x, h.y - pos.y) < 0.7)) return true;
+      if (p.type === "slottedStrip") {
+        const θr = p.rotation * Math.PI / 180;
+        const cosθ = Math.cos(θr), sinθ = Math.sin(θr);
+        const relX = pos.x - p.x, relY = pos.y - p.y;
+        const along = relX * cosθ + relY * sinθ;
+        const perp = Math.abs(-relX * sinθ + relY * cosθ);
+        if (along >= 0.4 && along <= p.size - 1.4 && perp < 0.7) return true;
+      }
+      return false;
+    }).map(p => p.id));
+  }, [jointToolActive, jointSnap, st.parts]);
+
   // Compute SVG canvas cursor — custom data-URI for rotate/scale zones
   const svgCanvasCursor = (() => {
     if (spaceHeld) return drag?.kind === "space-pan" ? "grabbing" : "grab";
@@ -2291,6 +1745,21 @@ export default function ZineMachine() {
         fontFamily: "'DM Sans', ui-sans-serif, system-ui, sans-serif",
       }}
     >
+      {/* UI Overlay */}
+      <div className="fixed top-4 left-4 z-50 pointer-events-none flex flex-col gap-1">
+        <div className="bg-black/80 text-white px-3 py-1 rounded-full text-[10px] font-mono border border-white/20 shadow-lg backdrop-blur-sm">
+          BRANCH: gemini-refactor
+        </div>
+        <div className="bg-hotpink/90 text-white px-3 py-1 rounded-full text-[10px] font-mono border border-white/20 shadow-lg backdrop-blur-sm">
+          REV: GEMINI-REFACTOR-17
+        </div>
+
+        {st.mode === "play" && (
+          <div className="bg-blue-600/90 text-white px-3 py-1 rounded-full text-[10px] font-mono border border-white/20 shadow-lg backdrop-blur-sm">
+            FRAME: {window._simFrame || 0} | STATUS: {window._rapierStatus || "OFF"}
+          </div>
+        )}
+      </div>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=Noto+Symbols+2&display=swap');
         .serif { font-family: 'DM Serif Display', ui-serif, Georgia, serif; }
@@ -2357,6 +1826,31 @@ export default function ZineMachine() {
               </g>
             )}
 
+            {/* Drop ghost: dashed gold outline at origin of last moved strip */}
+            {dropGhost && st.mode === "build" && (() => {
+              const p = dropGhost;
+              const holes = getLocalHoles(p);
+              const n = p.size;
+              const len = (n - 1) * GRID;
+              const w = STRIP_W * GRID;
+              const pad = w / 2;
+              return (
+                <g transform={`translate(${p.x * GRID},${p.y * GRID}) rotate(${p.rotation})`} pointerEvents="none">
+                  <rect
+                    x={-pad} y={-w / 2}
+                    width={len + 2 * pad} height={w}
+                    rx={w / 2} ry={w / 2}
+                    fill="none"
+                    stroke={COLORS.select} strokeWidth="1.5" strokeDasharray="5 4"
+                  />
+                  {holes.map((h, i) => (
+                    <circle key={i} cx={h.x * GRID} cy={0} r={HOLE_R_PART}
+                      fill={COLORS.select} opacity="0.45" />
+                  ))}
+                </g>
+              );
+            })()}
+
             {/* Parts */}
             <g>
               {[...displayParts].sort((a, b) => {
@@ -2380,6 +1874,8 @@ export default function ZineMachine() {
                     part={p}
                     selected={p.id === st.selectedId && st.mode === "build"}
                     scaling={drag?.kind === "resize" && drag.id === p.id}
+                    pivotIdx={p.pivotHoleIdx ?? 0}
+                    highlighted={partsAtJointIds.has(p.id)}
                   />
                 </g>
               ))}
@@ -2402,8 +1898,8 @@ export default function ZineMachine() {
               </g>
             )}
 
-            {/* Rotation handle for selected part */}
-            {selectedPart && st.mode === "build" && (
+            {/* Rotation handle for selected part — hidden while body-dragging */}
+            {selectedPart && st.mode === "build" && drag?.kind !== "move" && (
               <RotationHandle
                 part={selectedPart}
                 zone={handleZone}
@@ -2417,8 +1913,12 @@ export default function ZineMachine() {
                 onGhostDown={(e) => {
                   e.stopPropagation();
                   const part = selectedPart;
+                  const holes = getLocalHoles(part);
                   const pivotIdx = part.pivotHoleIdx ?? 0;
-                  const newPivotIdx = pivotIdx === 0 ? part.size - 1 : 0;
+                  const distToStart = Math.abs(pivotIdx - 0);
+                  const distToEnd = Math.abs(pivotIdx - (holes.length - 1));
+                  const newPivotIdx = distToStart < distToEnd ? holes.length - 1 : 0;
+
                   dispatch({ type: "UPDATE_PART", id: part.id, updates: { pivotHoleIdx: newPivotIdx } });
                   dispatch({ type: "SNAPSHOT" });
                 }}
@@ -2462,10 +1962,12 @@ export default function ZineMachine() {
             <g>
               {st.joints.filter(j => !(drag?.kind === "resize" && j.partIds.includes(drag.id))).map(j => {
                 let jx = j.x, jy = j.y;
-                if (simParts && simRef.current?.constraintMap) {
-                  const cm = simRef.current.constraintMap.get(j.id);
-                  const entry = cm?.[0];
-                  if (entry) {
+                if (simParts && simCM) {
+                  const cm = simCM.get(j.id);
+                  if (cm && cm.length > 0) {
+                    // CRITICAL: For slotted joints, pick a NON-SLOTTED part as the visual anchor.
+                    // This ensures the green dot follows the pin, not the starting hole on the rail.
+                    const entry = cm.find(e => !e.isSlot) || cm[0];
                     const sp = displayPartMap.get(entry.partId);
                     if (sp) {
                       const wh = simWorldHole(sp, entry.holeIdx);
@@ -2602,7 +2104,8 @@ export default function ZineMachine() {
 function ContextMenu({ x, y, part, multiIds, onClose, onAction }) {
   const isStrip = part.type === "strip" || part.type === "slottedStrip";
   const isMotor = part.type === "motor";
-  const curSpeed = part.speed ?? MOTOR_SPEED_DEG;
+  const curSpeed = part.speed ?? 90;
+  const curTorque = part.torque ?? 1000000;
   const curDir = part.direction ?? 1;
 
   const isBell = part.type === "bell";
@@ -2654,6 +2157,23 @@ function ContextMenu({ x, y, part, multiIds, onClose, onAction }) {
           />
           <div className="flex justify-between mono text-[9px]" style={{ color: COLORS.inkDim }}>
             <span>2</span><span>15</span>
+          </div>
+        </div>
+      )}
+
+      {/* Motor torque slider */}
+      {!isMulti && isMotor && (
+        <div className="px-3 py-2 border-b" style={{ borderColor: COLORS.divider }}>
+          <div className="mono text-[10px] mb-1.5" style={{ color: COLORS.inkDim }}>
+            Motor Torque: {(curTorque / 1000000).toFixed(1)}M
+          </div>
+          <input
+            type="range" min={100000} max={5000000} step={100000} value={curTorque}
+            onChange={(e) => onAction("UPDATE_PART", { torque: parseInt(e.target.value) }, true)}
+            style={{ width: "100%", accentColor: COLORS.board }}
+          />
+          <div className="flex justify-between mono text-[9px]" style={{ color: COLORS.inkDim }}>
+            <span>Low</span><span>Max</span>
           </div>
         </div>
       )}
@@ -2758,6 +2278,23 @@ function JointPin({ joint, onPointerDown, deletable, overrideX, overrideY, selec
   );
 }
 
+// Returns "scale", "rotate", or null based on cursor position relative to handle.
+// cx,cy = handle centre (SVG px). ax,ay = pivot hole (SVG px).
+// Rotate only when cursor is on the FAR side of the handle (beyond the strip end).
+function getHandleZone(e, cx, cy, ax, ay) {
+  // Use the circle element's own CTM so the coordinate space matches cx,cy (inside camera transform)
+  const pt = e.currentTarget.ownerSVGElement.createSVGPoint();
+  pt.x = e.clientX; pt.y = e.clientY;
+  const local = pt.matrixTransform(e.currentTarget.getScreenCTM().inverse());
+  const dx = local.x - cx, dy = local.y - cy;
+  if (Math.hypot(dx, dy) <= HANDLE_R) return "scale";
+  const axLen = Math.hypot(cx - ax, cy - ay);
+  if (axLen === 0) return null;
+  // Rotate only when cursor is on the far side of the handle (away from the strip)
+  const dot = dx * (cx - ax) / axLen + dy * (cy - ay) / axLen;
+  return dot > 0 ? "rotate" : null;
+}
+
 // ---------- Part handle (dual-state: scale inner zone, rotate outer ring) ----------
 function RotationHandle({ part, zone, onZoneChange, onRotateDown, onScaleDown, activeDrag, dragStartRotation, cumulativeRot, onDragEnd, onGhostDown }) {
   const local = rotationHandleLocal(part);
@@ -2789,7 +2326,7 @@ function RotationHandle({ part, zone, onZoneChange, onRotateDown, onScaleDown, a
   const lhy = lastHoleWH ? lastHoleWH.y * GRID : cy;
   const arcR = Math.hypot(lhx - ax, lhy - ay);
 
-  const showRotCircle = zone === "rotate" || activeDrag === "rotate";
+  const showRotCircle = (zone === "rotate" || activeDrag === "rotate") && activeDrag !== "resize";
   const showArc = activeDrag === "rotate";
 
   // Protractor arc: sweeps from drag-start position to current other-hole position
@@ -2837,28 +2374,34 @@ function RotationHandle({ part, zone, onZoneChange, onRotateDown, onScaleDown, a
         </>
       )}
 
-      {/* Ghost handle (salmon) — hidden during scale drag */}
+      {/* Active handle — outer ring behind for rotate, yellow dot on top for reliable scale */}
+      <g onPointerUp={(e) => { e.stopPropagation(); onDragEnd?.(); }}>
+        <circle cx={cx} cy={cy} r={20} fill="transparent"
+          pointerEvents={activeDrag ? "none" : "all"}
+          onPointerMove={(e) => { onZoneChange?.(getHandleZone(e, cx, cy, ax, ay)); }}
+          onPointerLeave={() => onZoneChange?.(null)}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            if (getHandleZone(e, cx, cy, ax, ay) === "rotate") onRotateDown(e);
+          }} />
+        <circle cx={cx} cy={cy} r={HANDLE_R}
+          fill={COLORS.select} stroke={COLORS.partEdge} strokeWidth="1.4"
+          pointerEvents={activeDrag || !isStrip ? "none" : "all"}
+          onPointerMove={(e) => { e.stopPropagation(); onZoneChange?.("scale"); }}
+          onPointerLeave={(e) => { e.stopPropagation(); onZoneChange?.(getHandleZone(e, cx, cy, ax, ay)); }}
+          onPointerDown={(e) => { e.stopPropagation(); onScaleDown(e); }} />
+      </g>
+
+      {/* Ghost handle (salmon) — rendered AFTER active handle so it's on top in z-order */}
       {isStrip && gx !== null && gy !== null && activeDrag !== "resize" && (
-        <g onPointerDown={(e) => { e.stopPropagation(); onGhostDown?.(e); }}>
-          <circle cx={gx} cy={gy} r={20} fill="none" pointerEvents="all" />
+        <>
+          <circle cx={gx} cy={gy} r={20} fill="transparent" stroke="none"
+            pointerEvents="all"
+            onPointerDown={(e) => { e.stopPropagation(); onGhostDown?.(e); }} />
           <circle cx={gx} cy={gy} r={HANDLE_R}
             fill={COLORS.ghostHandle} stroke={COLORS.partEdge} strokeWidth="1.4" opacity="0.7" pointerEvents="none" />
-        </g>
+        </>
       )}
-
-      {/* Active handle — outer ring = rotate, inner = scale */}
-      <g onMouseLeave={() => onZoneChange?.(null)} onPointerUp={(e) => { e.stopPropagation(); onDragEnd?.(); }}>
-        <circle cx={cx} cy={cy} r={20} fill="none" pointerEvents="all"
-          onPointerEnter={() => onZoneChange?.("rotate")}
-          onPointerDown={(e) => { e.stopPropagation(); onRotateDown(e); }} />
-        <circle cx={cx} cy={cy} r={HANDLE_R}
-          fill={COLORS.select} stroke={COLORS.partEdge} strokeWidth="1.4" pointerEvents="none" />
-        {isStrip && (
-          <circle cx={cx} cy={cy} r={HANDLE_R} fill="none" pointerEvents="all"
-            onPointerEnter={() => onZoneChange?.("scale")}
-            onPointerDown={(e) => { e.stopPropagation(); onScaleDown(e); }} />
-        )}
-      </g>
     </g>
   );
 }
@@ -3361,7 +2904,7 @@ function StatusChip({ st, hoverHole, simJammed }) {
     "select";
 
   return (
-    <div className="absolute left-4 bottom-4 flex items-center gap-2">
+    <div className="absolute left-4 bottom-4 flex items-center gap-2 pointer-events-auto">
       <div
         className="mono text-[10px] px-2.5 py-1.5 rounded flex items-center gap-3"
         style={{
@@ -3382,6 +2925,21 @@ function StatusChip({ st, hoverHole, simJammed }) {
             <span>{hoverHole.x},{hoverHole.y}</span>
           </>
         )}
+        <span style={{ color: COLORS.divider }}>│</span>
+        <button
+          className="hover:text-white transition-colors"
+          onClick={() => {
+            const data = JSON.stringify(window._zineLogs || [], null, 2);
+            const blob = new Blob([data], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `zine_log_${Date.now()}.json`;
+            a.click();
+          }}
+        >
+          Download Log
+        </button>
       </div>
       {simJammed && (
         <div

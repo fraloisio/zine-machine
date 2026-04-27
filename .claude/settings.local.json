@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Bash(mkdir -p /Users/francescoaloisio/AndroidStudioProjects/Zine-Machine/misc)",
+      "Read(//private/tmp/**)",
+      "Bash(unzip -o \"/Users/francescoaloisio/Downloads/Cursors \\(Community\\).zip\" -d \"/Users/francescoaloisio/AndroidStudioProjects/Zine-Machine/misc/\")",
+      "Bash(cp \"/Users/francescoaloisio/Downloads/zine_machine_spec.md\" \"/Users/francescoaloisio/AndroidStudioProjects/Zine-Machine/misc/\")",
+      "Bash(cp \"/Users/francescoaloisio/Downloads/strip_states.html\" \"/Users/francescoaloisio/AndroidStudioProjects/Zine-Machine/misc/\")",
+      "Bash(cp \"/Users/francescoaloisio/Downloads/cursor_reference.html\" \"/Users/francescoaloisio/AndroidStudioProjects/Zine-Machine/misc/\")"
     ]
   }
 }
